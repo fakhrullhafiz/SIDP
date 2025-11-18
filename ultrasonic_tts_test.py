@@ -1,36 +1,77 @@
-# ultrasonic_sensor.py
-import time
 import RPi.GPIO as GPIO
+import time
+import os
 
-class UltrasonicSensor:
-    def __init__(self, trig_pin, echo_pin):
-        self.trig = trig_pin
-        self.echo = echo_pin
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(self.trig, GPIO.OUT)
-        GPIO.setup(self.echo, GPIO.IN)
+# === GPIO SETUP ===
+GPIO.setmode(GPIO.BOARD)
 
-    def get_distance(self):
-        # Send trigger pulse
-        GPIO.output(self.trig, True)
-        time.sleep(0.00001)
-        GPIO.output(self.trig, False)
+# Pins for the ultrasonic sensor
+TRIG = 11  # GPIO 17
+ECHO = 12  # GPIO 18
 
-        start_time = time.time()
-        stop_time = time.time()
+GPIO.setup(TRIG, GPIO.OUT)
+GPIO.setup(ECHO, GPIO.IN)
 
-        # Save start time
-        while GPIO.input(self.echo) == 0:
-            start_time = time.time()
+GPIO.output(TRIG, False)
+print("Waiting for sensor to settle...")
+time.sleep(2)
 
-        # Save arrival time
-        while GPIO.input(self.echo) == 1:
-            stop_time = time.time()
+# === FUNCTION TO MEASURE DISTANCE ===
+def measure_distance():
+    # Send a 10μs pulse
+    GPIO.output(TRIG, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG, False)
 
-        # Calculate distance
-        time_elapsed = stop_time - start_time
-        distance = (time_elapsed * 34300) / 2
-        return round(distance, 2)
+    pulse_start = time.time()
+    pulse_end = time.time()
 
-    def cleanup(self):
-        GPIO.cleanup()
+    # Wait for echo to go high
+    while GPIO.input(ECHO) == 0:
+        pulse_start = time.time()
+
+    # Wait for echo to go low
+    while GPIO.input(ECHO) == 1:
+        pulse_end = time.time()
+
+    pulse_duration = pulse_end - pulse_start
+    distance = pulse_duration * 17150  # Convert to cm
+    distance = round(distance, 2)
+    return distance
+
+
+# === MAIN LOOP ===
+try:
+    last_message = None
+    last_announce_time = 0
+    announce_interval = 2  # seconds between TTS messages
+
+    while True:
+        distance = measure_distance()
+        print(f"Distance: {distance} cm")
+
+        current_time = time.time()
+
+        # === Threshold logic ===
+        if distance < 50:
+            message = "Stop"
+        elif distance < 100:
+            message = "Warning, object ahead"
+        elif distance < 200:
+            message = "Caution"
+        else:
+            message = None
+
+        # === Speak only if message changes or interval passes ===
+        if message and (message != last_message or current_time - last_announce_time > announce_interval):
+            os.system(f"espeak '{message}'")
+            last_message = message
+            last_announce_time = current_time
+
+        time.sleep(1)
+
+except KeyboardInterrupt:
+    print("Stopped by user")
+
+finally:
+    GPIO.cleanup()
