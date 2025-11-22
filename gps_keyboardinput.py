@@ -21,7 +21,7 @@ ser = serial.Serial(port, baudrate=9600, timeout=1)
 # ============================
 cred = credentials.Certificate("sidp-5fcae-firebase-adminsdk-fbsvc-8989d44269.json")
 firebase_admin.initialize_app(cred, {
-    "databaseURL": "https://console.firebase.google.com/u/0/project/sidp-5fcae/database/sidp-5fcae-default-rtdb/data/~2F"
+    "databaseURL": "https://sidp-5fcae-default-rtdb.asia-southeast1.firebasedatabase.app"
 })
 
 def push_sos_to_firebase(lat, lng):
@@ -56,8 +56,7 @@ def listen_for_command():
 # GET ONE GPS FIX WITH TIMEOUT
 # ============================
 def get_gps_coordinates(timeout=10, round_coords=False):
-    """Return latitude and longitude, or None if GPS fix fails after timeout.
-       If round_coords=True, round to 3 decimals for display."""
+    """Return latitude and longitude, or None if GPS fix fails after timeout."""
     start = time.time()
     while True:
         if time.time() - start > timeout:
@@ -70,8 +69,6 @@ def get_gps_coordinates(timeout=10, round_coords=False):
                 lat = getattr(msg, 'latitude', None)
                 lng = getattr(msg, 'longitude', None)
                 if lat and lng:
-                    if round_coords:
-                        return round(lat, 3), round(lng, 3)
                     return lat, lng
         except Exception as e:
             print(f"[GPS ERROR] {e}")
@@ -108,6 +105,10 @@ def send_sos():
     if lat is None:
         speak("Could not get a GPS fix. SOS not sent.")
         return
+        
+    # Round coordiantes to 3 decimals before sending
+    lat = round(lat,3)
+    lng = round(lng,3)
     
     try:
         push_sos_to_firebase(lat, lng)
@@ -130,6 +131,11 @@ def handle_command(command):
         if lat is None:
             speak("Could not get GPS fix. Try moving to a location with better signal.")
             return
+        
+        # Round for display
+        lat = round(lat,3)
+        lng = round(lng,3)
+        
         speak(f"Your coordinates are latitude {lat} and longitude {lng}.")
         address = reverse_geocode(lat, lng)
         speak(f"You are currently at: {address}")
