@@ -165,7 +165,7 @@ def ultrasonic_worker():
     """Background thread for continuous ultrasonic monitoring"""
     last_message = None
     last_announce_time = 0
-    announce_interval = 2.0
+    announce_interval = 3.0
     
     while True:
         distance = measure_distance()
@@ -220,7 +220,7 @@ def ultrasonic_worker():
         }
         upload_to_firebase("ultrasonic", firebase_data)
         
-        time.sleep(0.2)
+        time.sleep(1.0)
 
 ultrasonic_thread = threading.Thread(target=ultrasonic_worker, daemon=True)
 ultrasonic_thread.start()
@@ -250,7 +250,7 @@ fps_counter = 0
 fps_start_time = time.time()
 
 # Skip-frame optimization
-frame_skip = 2  # Run YOLO every 2nd frame
+frame_skip = 3  # Run YOLO every 2nd frame
 frame_count = 0
 last_boxes = []
 last_detected_names = []
@@ -381,16 +381,16 @@ try:
             color = ultrasonic_data["color"]
         
         # Semi-transparent overlay
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (5, 5), (315, 70), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+        #overlay = frame.copy()
+        #cv2.rectangle(overlay, (5, 5), (315, 70), (0, 0, 0), -1)
+        #cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
         
         # Display ultrasonic info
         cv2.putText(frame, f"Distance: {distance:.1f} cm", (10, 25),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.putText(frame, f"Status: {message}", (10, 50),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        cv2.rectangle(frame, (10, 55), (310, 65), color, -1)
+        #cv2.rectangle(frame, (10, 55), (310, 65), color, -1)
         
         # ========================================
         # FPS CALCULATION (updates every second)
@@ -404,7 +404,7 @@ try:
         
         # Display FPS
         cv2.putText(frame, f"FPS: {fps:.1f}", (10, 90),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         
         # Show frame
         cv2.imshow("Vision Assistance System", frame)
