@@ -26,6 +26,44 @@ print("Firebase initialized successfully!")
 malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
 
 # ========================================
+# THREADED FIREBASE UPLOADER
+# ========================================
+firebase_queue = queue.Queue(maxsize=100)
+
+def firebase_worker():
+    """Background thread for non-blocking Firebase uploads"""
+    while True:
+        try:
+            upload_type, data = firebase_queue.get(timeout=1)
+            if upload_type is None:
+                break
+            
+            if upload_type == "ultrasonic":
+                ultrasonic_db.push(data)
+            elif upload_type == "objects":
+                object_db.push(data)
+            
+            firebase_queue.task_done()
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"Firebase upload error: {e}")
+            try:
+                firebase_queue.task_done()
+            except:
+                pass
+
+firebase_thread = threading.Thread(target=firebase_worker, daemon=True)
+firebase_thread.start()
+
+def upload_to_firebase(upload_type, data):
+    """Queue data for background Firebase upload"""
+    try:
+        firebase_queue.put_nowait((upload_type, data))
+    except queue.Full:
+        print("Firebase queue full, skipping upload")
+
+# ========================================
 # UNIFIED TTS SYSTEM (Threaded, Non-blocking)
 # ========================================
 tts_queue = queue.PriorityQueue()
@@ -52,7 +90,6 @@ def tts_worker():
                 tts_queue.task_done()
                 break
             
-            # Speak the text
             if use_pyttsx3 and engine is not None:
                 engine.say(text)
                 engine.runAndWait()
@@ -73,10 +110,7 @@ tts_thread = threading.Thread(target=tts_worker, daemon=True)
 tts_thread.start()
 
 def speak(text, priority=5):
-    """
-    Add text to TTS queue
-    priority: 1=critical (Stop), 3=warning, 5=normal (object detection)
-    """
+    """Add text to TTS queue with priority"""
     tts_queue.put((priority, text))
 
 # ========================================
@@ -91,7 +125,6 @@ GPIO.setup(ECHO, GPIO.IN)
 GPIO.output(TRIG, False)
 time.sleep(0.1)
 
-# Shared ultrasonic data
 ultrasonic_data = {
     "distance": 0,
     "message": "Initializing...",
@@ -146,16 +179,15 @@ def ultrasonic_worker():
             time.sleep(0.2)
             continue
         
-        # Determine warning level and color
-        if distance < 25:
+        if distance < 50:
             message = "Stop"
             color = (0, 0, 255)
             priority = 1
-        elif distance < 50:
+        elif distance < 100:
             message = "Warning"
             color = (0, 165, 255)
             priority = 2
-        elif distance < 75:
+        elif distance < 200:
             message = "Caution"
             color = (0, 255, 255)
             priority = 3
@@ -164,14 +196,12 @@ def ultrasonic_worker():
             color = (0, 255, 0)
             priority = 5
         
-        # Update shared data
         with ultrasonic_lock:
             ultrasonic_data["distance"] = distance
             ultrasonic_data["message"] = message
             ultrasonic_data["color"] = color
             ultrasonic_data["last_update"] = current_time
         
-        # TTS announcement logic
         if message != "Clear":
             if message != last_message or (current_time - last_announce_time) > announce_interval:
                 speak(message, priority=priority)
@@ -180,22 +210,18 @@ def ultrasonic_worker():
         else:
             last_message = None
         
-        # Upload to Firebase
-        try:
-            now = datetime.datetime.now(malaysia_tz)
-            timestamp = now.strftime("%Y/%m/%d %H:%M:%S")
-            firebase_data = {
-                "timestamp": timestamp,
-                "distance_cm": distance,
-                "message": message
-            }
-            ultrasonic_db.push(firebase_data)
-        except Exception as e:
-            print(f"Firebase ultrasonic upload error: {e}")
+        # Non-blocking Firebase upload
+        now = datetime.datetime.now(malaysia_tz)
+        timestamp = now.strftime("%Y/%m/%d %H:%M:%S")
+        firebase_data = {
+            "timestamp": timestamp,
+            "distance_cm": distance,
+            "message": message
+        }
+        upload_to_firebase("ultrasonic", firebase_data)
         
         time.sleep(0.2)
 
-# Start ultrasonic monitoring thread
 ultrasonic_thread = threading.Thread(target=ultrasonic_worker, daemon=True)
 ultrasonic_thread.start()
 
@@ -212,15 +238,24 @@ last_announced = {}
 
 picam2 = Picamera2()
 config = picam2.create_preview_configuration(
-    main={"size": (320, 240), "format": "XBGR8888"}
+    main={"size": (640,480), "format": "XBGR8888"}
 )
 picam2.configure(config)
 picam2.start()
 print("Camera started. Press 'q' to quit")
 
-# FPS tracking
-start_time = time.time()
+# FPS tracking (updates every second)
+fps = 0.0
+fps_counter = 0
+fps_start_time = time.time()
+
+# Skip-frame optimization
+frame_skip = 2  # Run YOLO every 2nd frame
 frame_count = 0
+last_boxes = []
+last_detected_names = []
+last_confs = []
+last_keep_idx = []
 
 # ========================================
 # MAIN LOOP
@@ -231,103 +266,121 @@ try:
         frame = picam2.capture_array()
         frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
         
-        # Run YOLO inference
-        results = model.predict(frame, imgsz=320, conf=0.35, verbose=False)
-        r = results[0]
+        frame_count += 1
+        run_yolo = (frame_count % frame_skip == 0)
         
-        # Process detections
-        try:
-            cls_array = r.boxes.cls.cpu().numpy()
-            boxes = r.boxes.xyxy.cpu().numpy()
-            confs = r.boxes.conf.cpu().numpy()
-        except Exception:
-            cls_array = np.array(r.boxes.cls)
-            boxes = np.array(r.boxes.xyxy)
-            confs = np.array(r.boxes.conf)
+        # ========================================
+        # YOLO INFERENCE (every Nth frame)
+        # ========================================
+        if run_yolo:
+            results = model.predict(frame, imgsz=320, conf=0.35, verbose=False)
+            r = results[0]
+            
+            try:
+                cls_array = r.boxes.cls.cpu().numpy()
+                boxes = r.boxes.xyxy.cpu().numpy()
+                confs = r.boxes.conf.cpu().numpy()
+            except Exception:
+                cls_array = np.array(r.boxes.cls)
+                boxes = np.array(r.boxes.xyxy)
+                confs = np.array(r.boxes.conf)
+            
+            cls_array = np.atleast_1d(np.array(cls_array).squeeze())
+            confs = np.atleast_1d(np.array(confs).squeeze())
+            boxes = np.array(boxes)
+            if boxes.ndim == 1 and boxes.size == 4:
+                boxes = boxes.reshape(1, 4)
+            
+            n = min(boxes.shape[0], cls_array.shape[0], confs.shape[0])
+            
+            detected_names = []
+            firebase_objects = []
+            
+            if n > 0:
+                boxes = boxes[:n]
+                cls_array = cls_array[:n]
+                confs = confs[:n]
+                
+                for c in cls_array:
+                    idx = int(c)
+                    if isinstance(model.names, dict):
+                        name = model.names.get(idx, str(idx))
+                    else:
+                        name = model.names[idx]
+                    detected_names.append(name)
+                
+                keep_idx = [i for i, name in enumerate(detected_names) if name in allowed_classes]
+                
+                # Announcement logic
+                announced_this_frame = set()
+                for i in keep_idx:
+                    name = detected_names[i]
+                    if name not in announced_this_frame:
+                        last_time = last_announced.get(name, 0)
+                        if (time.time() - last_time) >= ANNOUNCE_COOLDOWN:
+                            announced_this_frame.add(name)
+                            last_announced[name] = time.time()
+                
+                if announced_this_frame:
+                    announcement = ", ".join(announced_this_frame) + " detected"
+                    speak(announcement, priority=5)
+                
+                # Prepare Firebase data
+                for i in keep_idx:
+                    x1, y1, x2, y2 = boxes[i].astype(int)
+                    conf = float(confs[i])
+                    name = detected_names[i]
+                    firebase_objects.append({
+                        "name": name,
+                        "confidence": round(conf, 2),
+                        "bbox": [int(x1), int(y1), int(x2), int(y2)]
+                    })
+                
+                # Non-blocking Firebase upload
+                if firebase_objects:
+                    now = datetime.datetime.now(malaysia_tz)
+                    timestamp = now.strftime("%Y/%m/%d %H:%M:%S")
+                    data = {
+                        "timestamp": timestamp,
+                        "objects_detected": firebase_objects
+                    }
+                    upload_to_firebase("objects", data)
+                
+                # Cache results for skipped frames
+                last_boxes = boxes
+                last_detected_names = detected_names
+                last_confs = confs
+                last_keep_idx = keep_idx
+            else:
+                # No detections
+                last_boxes = []
+                last_detected_names = []
+                last_confs = []
+                last_keep_idx = []
         
-        cls_array = np.atleast_1d(np.array(cls_array).squeeze())
-        confs = np.atleast_1d(np.array(confs).squeeze())
-        boxes = np.array(boxes)
-        if boxes.ndim == 1 and boxes.size == 4:
-            boxes = boxes.reshape(1, 4)
-        
-        n = min(boxes.shape[0], cls_array.shape[0], confs.shape[0])
-        
-        # Get detected object names
-        detected_names = []
-        firebase_objects = []
-        
-        if n > 0:
-            boxes = boxes[:n]
-            cls_array = cls_array[:n]
-            confs = confs[:n]
-            
-            for c in cls_array:
-                idx = int(c)
-                if isinstance(model.names, dict):
-                    name = model.names.get(idx, str(idx))
-                else:
-                    name = model.names[idx]
-                detected_names.append(name)
-            
-            # Filter allowed classes
-            keep_idx = [i for i, name in enumerate(detected_names) if name in allowed_classes]
-            
-            # Announcement logic
-            announced_this_frame = set()
-            for i in keep_idx:
-                name = detected_names[i]
-                if name not in announced_this_frame:
-                    last_time = last_announced.get(name, 0)
-                    if (time.time() - last_time) >= ANNOUNCE_COOLDOWN:
-                        announced_this_frame.add(name)
-                        last_announced[name] = time.time()
-            
-            # Announce once per frame
-            if announced_this_frame:
-                announcement = ", ".join(announced_this_frame) + " detected"
-                speak(announcement, priority=5)
-            
-            # Draw bounding boxes
-            for i in keep_idx:
-                x1, y1, x2, y2 = boxes[i].astype(int)
-                conf = float(confs[i])
-                name = detected_names[i]
+        # ========================================
+        # DRAW BOUNDING BOXES (use cached results on skipped frames)
+        # ========================================
+        if len(last_keep_idx) > 0:
+            for i in last_keep_idx:
+                x1, y1, x2, y2 = last_boxes[i].astype(int)
+                conf = float(last_confs[i])
+                name = last_detected_names[i]
                 label = f"{name} {conf:.2f}"
                 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(frame, label, (x1, max(y1 - 8, 10)),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                
-                # Prepare Firebase data
-                firebase_objects.append({
-                    "name": name,
-                    "confidence": round(conf, 2),
-                    "bbox": [int(x1), int(y1), int(x2), int(y2)]
-                })
-        
-        # Upload YOLO detections to Firebase
-        if firebase_objects:
-            try:
-                now = datetime.datetime.now(malaysia_tz)
-                timestamp = now.strftime("%Y/%m/%d %H:%M:%S")
-                data = {
-                    "timestamp": timestamp,
-                    "objects_detected": firebase_objects
-                }
-                object_db.push(data)
-            except Exception as e:
-                print(f"Firebase object upload error: {e}")
         
         # ========================================
-        # OVERLAY ULTRASONIC DATA ON FRAME
+        # OVERLAY ULTRASONIC DATA
         # ========================================
         with ultrasonic_lock:
             distance = ultrasonic_data["distance"]
             message = ultrasonic_data["message"]
             color = ultrasonic_data["color"]
         
-        # Create semi-transparent overlay box
+        # Semi-transparent overlay
         overlay = frame.copy()
         cv2.rectangle(overlay, (5, 5), (315, 70), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
@@ -337,16 +390,21 @@ try:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.putText(frame, f"Status: {message}", (10, 50),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        
-        # Add color indicator bar
         cv2.rectangle(frame, (10, 55), (310, 65), color, -1)
         
+        # ========================================
+        # FPS CALCULATION (updates every second)
+        # ========================================
+        fps_counter += 1
+        current_time = time.time()
+        if current_time - fps_start_time >= 1.0:
+            fps = fps_counter / (current_time - fps_start_time)
+            fps_counter = 0
+            fps_start_time = current_time
+        
         # Display FPS
-        frame_count += 1
-        if frame_count % 30 == 0:
-            fps = frame_count / (time.time() - start_time)
-            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 90),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 90),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         
         # Show frame
         cv2.imshow("Vision Assistance System", frame)
@@ -358,35 +416,35 @@ except KeyboardInterrupt:
     print("\nStopped by user")
 
 finally:
-    # Clean shutdown
     print("Shutting down...")
     
-    # Stop camera
     try:
         picam2.stop()
     except Exception:
         pass
     
-    # Close OpenCV windows
     try:
         cv2.destroyAllWindows()
     except Exception:
         pass
     
-    # Cleanup GPIO
     try:
         GPIO.cleanup()
     except Exception:
         pass
     
-    # Stop TTS thread
+    try:
+        firebase_queue.put((None, None))
+        firebase_thread.join(timeout=2)
+    except Exception:
+        pass
+    
     try:
         tts_queue.put((0, None))
         tts_thread.join(timeout=2)
     except Exception:
         pass
     
-    # Clean pyttsx3 engine
     if use_pyttsx3 and engine is not None:
         try:
             engine.stop()
