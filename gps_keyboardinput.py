@@ -4,6 +4,7 @@ import requests
 import time
 import math
 import pyttsx3
+import threading
 import firebase_admin
 from firebase_admin import credentials, db
 
@@ -24,18 +25,8 @@ firebase_admin.initialize_app(cred, {
     "databaseURL": "https://sidp-5fcae-default-rtdb.asia-southeast1.firebasedatabase.app"
 })
 
-def push_sos_to_firebase(lat, lng):
-    sos_ref = db.reference("/sos")
-    payload = {
-        "latitude": lat,
-        "longitude": lng,
-        "timestamp": time.time()
-    }
-    sos_ref.set(payload)
-    print("[Prime]: SOS pushed to Firebase.")
-
 # ============================
-# TTS ENGINE SETUP
+# TTS ENGINE
 # ============================
 engine = pyttsx3.init()
 engine.setProperty('rate', 160)
@@ -46,21 +37,13 @@ def speak(text):
     engine.runAndWait()
 
 # ============================
-# TEXT INPUT FUNCTION
+# GPS FUNCTION
 # ============================
-def listen_for_command():
-    command = input("[Type command]: ")
-    return command.lower() if command else None
-
-# ============================
-# GET ONE GPS FIX WITH TIMEOUT
-# ============================
-def get_gps_coordinates(timeout=10, round_coords=False):
-    """Return latitude and longitude, or None if GPS fix fails after timeout."""
+def get_gps_coordinates(timeout=10):
     start = time.time()
     while True:
         if time.time() - start > timeout:
-            return None, None  # GPS failed
+            return None, None
 
         try:
             line = ser.readline().decode('ascii', errors='replace').strip()
@@ -70,12 +53,30 @@ def get_gps_coordinates(timeout=10, round_coords=False):
                 lng = getattr(msg, 'longitude', None)
                 if lat and lng:
                     return lat, lng
-        except Exception as e:
-            print(f"[GPS ERROR] {e}")
+        except:
             continue
 
 # ============================
-# GOOGLE REVERSE GEOCODING
+# FIREBASE PUSH FUNCTIONS
+# ============================
+def push_live_location(lat, lng):
+    ref = db.reference("/live_location")
+    ref.set({
+        "latitude": lat,
+        "longitude": lng,
+        "timestamp": time.time()
+    })
+
+def push_sos(lat, lng):
+    ref = db.reference("/sos")
+    ref.set({
+        "latitude": lat,
+        "longitude": lng,
+        "timestamp": time.time()
+    })
+
+# ============================
+# REVERSE GEOCODING
 # ============================
 def reverse_geocode(lat, lng):
     try:
@@ -85,78 +86,87 @@ def reverse_geocode(lat, lng):
         )
         response = requests.get(url)
         data = response.json()
-
         if data["status"] == "OK":
             return data["results"][0]["formatted_address"]
-        else:
-            print(f"[Geocode ERROR] Status: {data['status']}, Message: {data.get('error_message')}")
-            return "[ERROR] Reverse geocoding failed"
-    except Exception as e:
-        print(f"[Geocode EXCEPTION] {e}")
-        return "[ERROR] Reverse geocoding failed"
+        return "Unable to determine address"
+    except:
+        return "Reverse geocoding failed"
 
 # ============================
 # SOS FEATURE
 # ============================
 def send_sos():
     speak("SOS detected. Sending emergency alert now.")
-    
-    lat, lng = get_gps_coordinates(timeout=10, round_coords=False)
+
+    lat, lng = get_gps_coordinates(timeout=10)
     if lat is None:
-        speak("Could not get a GPS fix. SOS not sent.")
+        speak("No GPS fix. SOS not sent.")
         return
-        
-    # Round coordiantes to 3 decimals before sending
-    lat = round(lat,3)
-    lng = round(lng,3)
-    
-    try:
-        push_sos_to_firebase(lat, lng)
-        speak(f"Your SOS has been sent. Help is on the way. Coordinates: {lat}, {lng}")
-    except Exception as e:
-        print(f"[Firebase ERROR] {e}")
-        speak("Failed to send SOS to Firebase. Please try again.")
+
+    lat = round(lat, 3)
+    lng = round(lng, 3)
+
+    push_sos(lat, lng)
+    speak(f"SOS sent. Coordinates {lat}, {lng}")
+
+# ============================
+# BACKGROUND LIVE TRACKING THREAD
+# ============================
+def live_tracking_loop():
+    while True:
+        lat, lng = get_gps_coordinates(timeout=10)
+        if lat is not None:
+            lat = round(lat, 3)
+            lng = round(lng, 3)
+            push_live_location(lat, lng)
+        time.sleep(5)  # <-- UPDATE INTERVAL (EVERY 5 SECONDS)
 
 # ============================
 # COMMAND HANDLER
 # ============================
-def handle_command(command):
-    if command is None:
+def listen_for_command():
+    cmd = input("[Type command]: ")
+    return cmd.lower() if cmd else None
+
+def handle_command(cmd):
+    if cmd is None:
         return
 
-    # ------------------- LOCATION -------------------
-    if "location" in command:
-        speak("Let me get your current coordinates.")
-        lat, lng = get_gps_coordinates(timeout=10, round_coords=True)
-        if lat is None:
-            speak("Could not get GPS fix. Try moving to a location with better signal.")
-            return
-        
-        # Round for display
-        lat = round(lat,3)
-        lng = round(lng,3)
-        
-        speak(f"Your coordinates are latitude {lat} and longitude {lng}.")
-        address = reverse_geocode(lat, lng)
-        speak(f"You are currently at: {address}")
+    if "location" in cmd:
+        speak("Let me get your current location.")
 
-    # ------------------- SOS FEATURE -------------------
-    elif "sos" in command or "help" in command:
+        lat, lng = get_gps_coordinates(timeout=10)
+
+        if lat is None:
+            speak("No GPS fix.")
+            return
+
+        lat = round(lat, 3)
+        lng = round(lng, 3)
+
+        speak(f"Your coordinates are latitude {lat} and longitude {lng}.")
+        addr = reverse_geocode(lat, lng)
+        speak(f"You are currently at: {addr}")
+
+    elif "sos" in cmd or "help" in cmd:
         send_sos()
 
+
 # ============================
-# MAIN LOOP
+# MAIN PROGRAM START
 # ============================
 speak("Hi, I am Prime. How may I help you today?")
 
+# Start tracking thread
+threading.Thread(target=live_tracking_loop, daemon=True).start()
+
 while True:
     try:
-        command = listen_for_command()
-        handle_command(command)
+        cmd = listen_for_command()
+        handle_command(cmd)
     except KeyboardInterrupt:
         speak("Shutting down. Goodbye.")
         break
     except Exception as e:
-        # Catch all unexpected exceptions so Prime never crashes
-        print(f"[ERROR] {e}")
-        speak("An error occurred, but I am still running.")
+        print("[ERROR]", e)
+        speak("An error occurred but I am still running.")
