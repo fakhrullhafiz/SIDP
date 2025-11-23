@@ -20,7 +20,7 @@ ser = serial.Serial(port, baudrate=9600, timeout=1)
 # ============================
 # FIREBASE INITIALIZATION
 # ============================
-cred = credentials.Certificate("sidp-5fcae-firebase-adminsdk-fbsvc-8989d44269.json")
+cred = credentials.Certificate("/home/coe/firebase/firebase-key.json")
 firebase_admin.initialize_app(cred, {
     "databaseURL": "https://sidp-5fcae-default-rtdb.asia-southeast1.firebasedatabase.app"
 })
@@ -60,7 +60,7 @@ def get_gps_coordinates(timeout=10):
 # FIREBASE PUSH FUNCTIONS
 # ============================
 def push_live_location(lat, lng):
-    ref = db.reference("/live_location")
+    ref = db.reference("gpsDB")
     ref.set({
         "latitude": lat,
         "longitude": lng,
@@ -68,7 +68,7 @@ def push_live_location(lat, lng):
     })
 
 def push_sos(lat, lng):
-    ref = db.reference("/sos")
+    ref = db.reference("sos")
     ref.set({
         "latitude": lat,
         "longitude": lng,
@@ -116,8 +116,6 @@ def live_tracking_loop():
     while True:
         lat, lng = get_gps_coordinates(timeout=10)
         if lat is not None:
-            lat = round(lat, 3)
-            lng = round(lng, 3)
             push_live_location(lat, lng)
         time.sleep(5)  # <-- UPDATE INTERVAL (EVERY 5 SECONDS)
 
