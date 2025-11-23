@@ -103,11 +103,14 @@ def send_sos():
         speak("No GPS fix. SOS not sent.")
         return
 
-    lat = round(lat, 3)
-    lng = round(lng, 3)
-
+    # --- PUSH EXACT VALUES (NO ROUNDING) ---
     push_sos(lat, lng)
-    speak(f"SOS sent. Coordinates {lat}, {lng}")
+
+    # --- BUT SPEAK ROUNDED VALUES TO USER ---
+    lat_speak = round(lat, 3)
+    lng_speak = round(lng, 3)
+
+    speak(f"SOS sent. Coordinates {lat_speak}, {lng_speak}")
 
 # ============================
 # BACKGROUND LIVE TRACKING THREAD
