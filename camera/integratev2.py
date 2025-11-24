@@ -455,18 +455,27 @@ def upload_frame_to_firebase(frame):
         print("Error uploading frame:", e)
 
 # ========================================
-# MAIN LOOP
+# MAIN LOOP (CLEAN VERSION)
 # ========================================
+GUIDANCE_COOLDOWN = 1.0
+last_guidance_time = 0
+
+ARRIVAL_COOLDOWN = 3.0
+last_arrival_time = 0
+
 try:
     while not stop_event.is_set():
         frame = picam2.capture_array()
         frame_count += 1
         run_yolo = (frame_count % frame_skip == 0)
 
+        # ========================================
         # YOLO DETECTION
+        # ========================================
         if run_yolo:
             results = model.predict(frame, imgsz=320, conf=0.4, verbose=False)
             r = results[0]
+
             if len(r.boxes) > 0:
                 try:
                     cls_array = r.boxes.cls.cpu().numpy()
@@ -495,12 +504,12 @@ try:
                         now = time.time()
                         for i in keep:
                             name = names[i]
-                            if name not in announced:
-                                if now - last_announced.get(name, 0) >= 5.0:
-                                    announced.add(name)
-                                    last_announced[name] = now
+                            if now - last_announced.get(name, 0) >= ANNOUNCE_COOLDOWN:
+                                announced.add(name)
+                                last_announced[name] = now
+
                         if announced:
-                            speak(", ".join(announced) + " detected", 5)
+                            speak(", ".join(announced) + " detected", priority=5)
 
                         fb_objs = [{
                             "name": names[i],
@@ -512,14 +521,14 @@ try:
                             "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S"),
                             "objects_detected": fb_objs
                         })
-
-                        cached_boxes = boxes
-                        cached_names = names
-                        cached_confs = confs
-                        cached_keep = keep
                     else:
-                        cached_boxes = np.array([])
-                        cached_keep = []
+                        keep = []
+
+                    cached_boxes = boxes
+                    cached_names = names
+                    cached_confs = confs
+                    cached_keep = keep
+
                 else:
                     cached_boxes = np.array([])
                     cached_keep = []
@@ -527,22 +536,30 @@ try:
                 cached_boxes = np.array([])
                 cached_keep = []
 
-        # DRAW YOLO & ULTRASONIC INFO
+        # ========================================
+        # DRAW YOLO BOXES
+        # ========================================
         if len(cached_keep) > 0:
             for i in cached_keep:
                 x1, y1, x2, y2 = cached_boxes[i].astype(int)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), GREEN, 2)
                 label = f"{cached_names[i]} {cached_confs[i]:.2f}"
-                cv2.putText(frame, label, (x1, max(y1 - 5, 10)), FONT, 0.4, GREEN, 1)
+                cv2.putText(frame, label, (x1, max(y1 - 5, 10)),
+                            FONT, 0.4, GREEN, 1)
 
+        # ========================================
+        # ULTRASONIC DISPLAY
+        # ========================================
         with ultrasonic_lock:
             dist = ultrasonic_data["distance"]
             msg = ultrasonic_data["message"]
             col = ultrasonic_data["color"]
 
-        #cv2.putText(frame, f"Dist: {dist:.1f}cm", (10, 25), FONT, 0.6, WHITE, 2)
         cv2.putText(frame, msg, (10, 50), FONT, 0.7, col, 2)
 
+        # ========================================
+        # FPS COUNTER
+        # ========================================
         fps_counter += 1
         if time.time() - fps_start >= 1.0:
             fps = fps_counter / (time.time() - fps_start)
@@ -551,43 +568,66 @@ try:
 
         cv2.putText(frame, f"FPS:{fps:.1f}", (10, 85), FONT, 0.5, YELLOW, 1)
 
-        # ======= NAVIGATION LOGIC =======
-        if target_name is not None:
+        # ========================================
+        # NAVIGATION LOGIC
+        # ========================================
+        now = time.time()
+
+        if target_name is not None and len(cached_boxes) > 0:
+
+            # Find object index
             target_idx = None
             for i in cached_keep:
                 if cached_names[i] == target_name:
                     target_idx = i
                     break
-        
+
+            # --- Not found ---
             if target_idx is None:
-                speak(f"{target_name} not in view. Turn slowly.", priority=3)
+                if now - last_guidance_time > GUIDANCE_COOLDOWN:
+                    speak(f"{target_name} not in view. Turn slowly.", priority=3)
+                    last_guidance_time = now
+
             else:
+                # Safe access
                 x1, y1, x2, y2 = cached_boxes[target_idx].astype(int)
                 obj_cx = (x1 + x2) // 2
                 frame_cx = frame.shape[1] // 2
                 dx = obj_cx - frame_cx
-        
+
+                # Determine left / right / center
                 horiz = "center"
                 if dx < -30: horiz = "left"
                 elif dx > 30: horiz = "right"
-        
-                if horiz == "center":
-                    speak("Move forward", priority=3)
-                else:
-                    speak(f"Turn {horiz}", priority=3)
-        
-                if dist < 50:
-                    speak(f"You have arrived at the {target_name}", priority=1)
-                    target_name = None
 
+                # Guidance (cooldown protected)
+                if now - last_guidance_time > GUIDANCE_COOLDOWN:
+                    if horiz == "center":
+                        speak("Move forward", priority=3)
+                    else:
+                        speak(f"Turn {horiz}", priority=3)
+                    last_guidance_time = now
+
+                # Arrival detection (cooldown protected)
+                if dist < 50:
+                    if now - last_arrival_time > ARRIVAL_COOLDOWN:
+                        speak(f"You have arrived at the {target_name}", priority=1)
+                        target_name = None
+                        last_arrival_time = now
+
+        # ========================================
+        # STREAM FRAME
+        # ========================================
         frame_for_stream = frame.copy()
 
-        # Upload to Firebase live stream every 3 frames (~10 FPS)
         if frame_count % 3 == 0:
             upload_frame_to_firebase(frame_for_stream)
 
         time.sleep(0.03)
 
+# ========================================
+# SHUTDOWN HANDLER
+# ========================================
 except KeyboardInterrupt:
     print("\nStopped by KeyboardInterrupt")
     stop_event.set()
@@ -614,4 +654,5 @@ finally:
     if use_pyttsx3:
         try: engine.stop()
         except: pass
+
     print("Exit")
