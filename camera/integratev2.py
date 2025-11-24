@@ -431,18 +431,25 @@ def voice_button_watcher():
     while not stop_event.is_set():
         cur = GPIO.input(VOICE_BUTTON_PIN)
 
+        # Detect falling edge (button press)
         if last == 1 and cur == 0:
-            if not voice_recording:
-                voice_recording = True
-                voice_buffer.clear()
-                speak("Recording. Say your destination and press again.")
-            else:
-                voice_recording = False
-                speak("Processing destination.")
-                threading.Thread(target=process_recording_and_set_target, daemon=True).start()
+            # HARD debounce
+            time.sleep(0.15)
+            if GPIO.input(VOICE_BUTTON_PIN) == 0:  # confirm still pressed
+                if not voice_recording:
+                    voice_recording = True
+                    voice_buffer.clear()
+                    speak("Recording. Say your destination and press again.")
+                else:
+                    voice_recording = False
+                    speak("Processing destination.")
+                    threading.Thread(
+                        target=process_recording_and_set_target,
+                        daemon=True
+                    ).start()
 
         last = cur
-        time.sleep(0.05)
+        time.sleep(0.02)  # small loop delay (fine)
 
 voice_button_thread = threading.Thread(target=voice_button_watcher, daemon=True)
 voice_button_thread.start()
@@ -634,7 +641,7 @@ try:
         # ========================================
         frame_for_stream = frame.copy()
 
-        if frame_count % 3 == 0:
+        if frame_count % 10 == 0:
             upload_frame_to_firebase(frame_for_stream)
 
         time.sleep(0.03)
