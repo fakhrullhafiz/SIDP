@@ -25,6 +25,7 @@ firebase_admin.initialize_app(cred, {
 ultrasonic_db = db.reference("ultrasonicDB")
 object_db = db.reference("objectDetectionDB")
 live_stream_db = db.reference("liveStreamDB")
+device_status_db = db.reference("deviceStatus")
 print("Firebase initialized")
 
 malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
@@ -34,6 +35,14 @@ malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
 # ========================================
 stop_event = threading.Event()
 mjpeg_server = None
+
+# ========================================
+# FIREBASE UPLOADER THREAD
+# ========================================
+device_status_db.update({
+    "raspberryPi": "ON",
+    "camera": "OFF"
+})
 
 # ========================================
 # FIREBASE UPLOADER THREAD
@@ -213,13 +222,12 @@ ultrasonic_thread.start()
 # ========================================
 model = YOLO("yolov8n.pt")
 
-'''
 allowed_classes = {
     'person', 'car', 'cat', 'dog', 'stop sign',
     'toilet', 'chair', 'bed', 'tv', 'dining table'
 }
-'''
-allowed_classes = {'person', 'car', 'stop sign', 'chair', 'dog', 'cat'}
+
+# allowed_classes = {'person', 'car', 'stop sign', 'chair', 'dog', 'cat'}
 ANNOUNCE_COOLDOWN = 5.0
 last_announced = {}
 
@@ -228,6 +236,7 @@ config = picam2.create_preview_configuration(main={"size": (240, 160), "format":
 picam2.configure(config)
 picam2.start()
 print("Camera started")
+device_status_db.update({"camera": "ON"})
 
 fps = 0.0
 fps_counter = 0
@@ -411,9 +420,10 @@ try:
             msg = ultrasonic_data["message"]
             col = ultrasonic_data["color"]
 
-        #cv2.putText(frame, f"Dist: {dist:.1f}cm", (10, 25), FONT, 0.6, WHITE, 2)
-        cv2.putText(frame, msg, (10, 50), FONT, 0.7, col, 2)
+        # cv2.putText(frame, f"Dist: {dist:.1f}cm", (10, 25), FONT, 0.6, WHITE, 2)
+        # cv2.putText(frame, msg, (10, 50), FONT, 0.7, col, 2)
 
+        '''
         fps_counter += 1
         if time.time() - fps_start >= 1.0:
             fps = fps_counter / (time.time() - fps_start)
@@ -421,7 +431,8 @@ try:
             fps_start = time.time()
 
         cv2.putText(frame, f"FPS:{fps:.1f}", (10, 85), FONT, 0.5, YELLOW, 1)
-
+        '''
+        
         frame_for_stream = frame.copy()
 
         # Upload to Firebase live stream every 3 frames (~10 FPS)
@@ -436,6 +447,13 @@ except KeyboardInterrupt:
 
 finally:
     print("Shutting down...")
+    try:
+        device_status_db.update({
+            "raspberryPi": "OFF",
+            "camera": "OFF"
+        })
+    except:
+        pass
     stop_event.set()
     try: picam2.stop()
     except: pass
