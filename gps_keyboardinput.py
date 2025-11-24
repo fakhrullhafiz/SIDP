@@ -172,12 +172,15 @@ def handle_command(cmd):
         if lat is None:
             speak("No GPS fix.")
             return
+            
+        full_lat = lat
+        full_lng = lng
 
-        lat = round(lat, 3)
-        lng = round(lng, 3)
+        lat_speak = round(lat, 3)
+        lng_speak = round(lng, 3)
 
-        speak(f"Your coordinates are latitude {lat} and longitude {lng}.")
-        addr = reverse_geocode(lat, lng)
+        speak(f"Your coordinates are latitude {lat_speak} and longitude {lng_speak}.")
+        addr = reverse_geocode(full_lat, full_lng)
         speak(f"You are currently at: {addr}")
 
     elif "sos" in cmd or "help" in cmd:
