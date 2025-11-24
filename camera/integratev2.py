@@ -188,7 +188,7 @@ def process_recording_and_set_target():
         speak("No audio captured.")
         return
 
-    import numpy as np, wave, json
+    import numpy as np
     data = np.concatenate(voice_buffer, axis=0)
     int16 = (data * 32767).astype(np.int16).flatten()
 
@@ -491,7 +491,7 @@ try:
         # YOLO DETECTION
         # ========================================
         if run_yolo:
-            results = model.predict(frame, imgsz=320, conf=0.4, verbose=False)
+            results = model.predict(frame, imgsz=160, conf=0.4, verbose=False)
             r = results[0]
 
             if len(r.boxes) > 0:
