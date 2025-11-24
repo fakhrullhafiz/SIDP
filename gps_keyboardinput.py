@@ -86,11 +86,19 @@ def reverse_geocode(lat, lng):
         )
         response = requests.get(url)
         data = response.json()
+
         if data["status"] == "OK":
+            # Try to find street-level address
+            for result in data["results"]:
+                if "route" in result["types"] or "street_address" in result["types"]:
+                    return result["formatted_address"]
+
+            # fallback: return the most specific non-plus-code result
             return data["results"][0]["formatted_address"]
+
         return "Unable to determine address"
-    except:
-        return "Reverse geocoding failed"
+    except Exception as e:
+        return f"Reverse geocoding failed: {e}"
 
 # ============================
 # SOS FEATURE
