@@ -212,16 +212,19 @@ ultrasonic_thread.start()
 # YOLO + CAMERA SETUP
 # ========================================
 model = YOLO("yolov8n.pt")
+
+'''
 allowed_classes = {
     'person', 'car', 'cat', 'dog', 'stop sign',
     'toilet', 'chair', 'bed', 'tv', 'dining table'
 }
+'''
 allowed_classes = {'person', 'car', 'stop sign', 'chair', 'dog', 'cat'}
 ANNOUNCE_COOLDOWN = 5.0
 last_announced = {}
 
 picam2 = Picamera2()
-config = picam2.create_preview_configuration(main={"size": (320, 240), "format": "RGB888"})
+config = picam2.create_preview_configuration(main={"size": (240, 160), "format": "RGB888"})
 picam2.configure(config)
 picam2.start()
 print("Camera started")
@@ -312,7 +315,7 @@ input_thread.start()
 # ========================================
 def upload_frame_to_firebase(frame):
     try:
-        resized_frame = cv2.resize(frame, (320, 240))
+        resized_frame = cv2.resize(frame, (640, 320))
         _, buffer = cv2.imencode('.jpg', resized_frame)
         jpg_as_text = base64.b64encode(buffer).decode('utf-8')
         upload_firebase("frame", {
@@ -408,7 +411,7 @@ try:
             msg = ultrasonic_data["message"]
             col = ultrasonic_data["color"]
 
-        cv2.putText(frame, f"Dist: {dist:.1f}cm", (10, 25), FONT, 0.6, WHITE, 2)
+        #cv2.putText(frame, f"Dist: {dist:.1f}cm", (10, 25), FONT, 0.6, WHITE, 2)
         cv2.putText(frame, msg, (10, 50), FONT, 0.7, col, 2)
 
         fps_counter += 1
