@@ -161,7 +161,7 @@ def print_summary(detected_beacons):
     """Print a clean summary table of all detected beacons"""
     timestamp = time.strftime('%H:%M:%S')
     print("\n" + "=" * 70)
-    print(f"📊 BEACON SUMMARY [{timestamp}]")
+    print(f"BEACON SUMMARY [{timestamp}]")
     print("=" * 70)
     
     if not detected_beacons:
@@ -175,11 +175,11 @@ def print_summary(detected_beacons):
     
     # Print each beacon
     for beacon_key, data in sorted(detected_beacons.items()):
-        marker = "⭐" if beacon_key == closest_key else "  "
-        status_emoji = "✅" if data['status'] == "Arrived" else \
-                      "🟢" if data['status'] == "Very Close" else \
-                      "🟡" if data['status'] == "Near" else \
-                      "🟠" if data['status'] == "Moderate" else "⚪"
+        marker = "⭐ " if beacon_key == closest_key else "  "
+        status_emoji = "Tick" if data['status'] == "Arrived" else \
+                      "Green" if data['status'] == "Very Close" else \
+                      "Yellow" if data['status'] == "Near" else \
+                      "Orange" if data['status'] == "Moderate" else "White"
         
         print(f"{marker} {status_emoji} {data['location']['name']:<20} | "
               f"{data['distance']:>5} m | "
@@ -335,5 +335,5 @@ if __name__ == "__main__":
         # Run async scanner
         asyncio.run(scan_beacons(duration=3600))  # Scan for 1 hour
     except KeyboardInterrupt:
-        print("\n\n🛑 Scanner stopped by user")
-        print("✅ Program terminated")
+        print("\n\n Scanner stopped by user")
+        print("Program terminated")
