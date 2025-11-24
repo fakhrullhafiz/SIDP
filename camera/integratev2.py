@@ -117,13 +117,51 @@ tts_thread = threading.Thread(target=tts_worker, daemon=True)
 tts_thread.start()
 
 def speak(text, priority=5):
-    tts_queue.put((priority, text))
+    # flush lower priority messages if a higher priority one arrives
+    try:
+        if not tts_queue.empty():
+            current = tts_queue.queue[0][0]
+            if priority < current:
+                with tts_queue.mutex:
+                    tts_queue.queue.clear()
+        tts_queue.put((priority, text))
+    except:
+        pass
+
+# ======= VOSK MODEL =======
+VOSK_MODEL_PATH = "/home/coe/vosk-model/vosk-model-small-en-us-0.15"
+if os.path.exists(VOSK_MODEL_PATH):
+    vosk_model = Model(VOSK_MODEL_PATH)
+else:
+    print("WARNING: Vosk model not found!")
+
+voice_recording = False
+voice_buffer = []
+target_name = None
+target_timestamp = 0
+
+SPEECH_TO_CLASS_MAP = {
+    "chair": "chair",
+    "a chair": "chair",
+    "man": "person",
+    "woman": "person",
+    "person": "person",
+    "car": "car",
+    "dog": "dog",
+    "cat": "cat",
+    "stop sign": "stop sign",
+}
+
+allowed_classes = {'person', 'car', 'stop sign', 'chair', 'dog', 'cat'}
 
 # ======= RECORDING AUDIO =======
 def audio_callback(indata, frames, time_info, status):
     if voice_recording:
         voice_buffer.append(indata.copy())
 
+# ======= Speech Recognition + State =======
+SAMPLE_RATE = 16000
+CHANNELS = 1
 audio_stream = sd.InputStream(
     samplerate=SAMPLE_RATE,
     channels=CHANNELS,
@@ -284,35 +322,6 @@ ultrasonic_thread.start()
 VOICE_BUTTON_PIN = 16  # Using BOARD numbering since your code uses GPIO.BOARD
 GPIO.setup(VOICE_BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-# ======= VOSK MODEL =======
-VOSK_MODEL_PATH = "/home/coe/vosk-model/vosk-model-small-en-us-0.15"
-if os.path.exists(VOSK_MODEL_PATH):
-    vosk_model = Model(VOSK_MODEL_PATH)
-else:
-    print("WARNING: Vosk model not found!")
-
-# ======= Speech Recognition + State =======
-SAMPLE_RATE = 16000
-CHANNELS = 1
-
-voice_recording = False
-voice_buffer = []
-target_name = None
-target_timestamp = 0
-
-SPEECH_TO_CLASS_MAP = {
-    "chair": "chair",
-    "a chair": "chair",
-    "man": "person",
-    "woman": "person",
-    "person": "person",
-    "car": "car",
-    "dog": "dog",
-    "cat": "cat",
-    "stop sign": "stop sign",
-}
-
-
 # ========================================
 # YOLO + CAMERA SETUP
 # ========================================
@@ -324,7 +333,6 @@ allowed_classes = {
     'toilet', 'chair', 'bed', 'tv', 'dining table'
 }
 '''
-allowed_classes = {'person', 'car', 'stop sign', 'chair', 'dog', 'cat'}
 ANNOUNCE_COOLDOWN = 5.0
 last_announced = {}
 
@@ -576,11 +584,17 @@ try:
         if target_name is not None and len(cached_boxes) > 0:
 
             # Find object index
-            target_idx = None
-            for i in cached_keep:
-                if cached_names[i] == target_name:
-                    target_idx = i
-                    break
+            possible_targets = [i for i in cached_keep if cached_names[i] == target_name]
+            
+            if possible_targets:
+                frame_center = frame.shape[1] // 2
+                target_idx = min(
+                    possible_targets,
+                    key=lambda i: abs(((cached_boxes[i][0] + cached_boxes[i][2]) // 2) - frame_center)
+                )
+            else:
+                target_idx = None
+
 
             # --- Not found ---
             if target_idx is None:
