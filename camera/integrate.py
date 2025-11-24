@@ -212,14 +212,11 @@ ultrasonic_thread.start()
 # YOLO + CAMERA SETUP
 # ========================================
 model = YOLO("yolov8n.pt")
-<<<<<<< HEAD
 allowed_classes = {
     'person', 'car', 'cat', 'dog', 'stop sign',
     'toilet', 'chair', 'bed', 'tv', 'dining table'
 }
-=======
 allowed_classes = {'person', 'car', 'stop sign', 'chair', 'dog', 'cat'}
->>>>>>> camera
 ANNOUNCE_COOLDOWN = 5.0
 last_announced = {}
 
