@@ -212,6 +212,8 @@ def process_recording_and_set_target():
     result = json.loads(rec.FinalResult())
     transcript = result.get("text", "")
 
+    mem.close()
+
     voice_buffer = []
 
     if not transcript:
