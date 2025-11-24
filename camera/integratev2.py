@@ -19,6 +19,8 @@ from firebase_admin import credentials, db
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import sys
 import base64
+import json       
+import wave        
 
 # ========================================
 # FIREBASE SETUP
@@ -300,7 +302,7 @@ def ultrasonic_worker():
                 "color": color
             })
 
-        if message != "Clear" and (message != last_message or (current_time - last_announce) > 2.0):
+        if message != "Clear" and (message != last_message or (current_time - last_announce) > 3.0):
             speak(message, priority)
             last_message = message
             last_announce = current_time
@@ -447,6 +449,7 @@ def voice_button_watcher():
                         target=process_recording_and_set_target,
                         daemon=True
                     ).start()
+                    voice_buffer = []
 
         last = cur
         time.sleep(0.02)  # small loop delay (fine)
@@ -459,7 +462,7 @@ voice_button_thread.start()
 # ========================================
 def upload_frame_to_firebase(frame):
     try:
-        resized_frame = cv2.resize(frame, (640, 320))
+        resized_frame = cv2.resize(frame, (320, 160))
         _, buffer = cv2.imencode('.jpg', resized_frame)
         jpg_as_text = base64.b64encode(buffer).decode('utf-8')
         upload_firebase("frame", {
