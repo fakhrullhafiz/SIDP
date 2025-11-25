@@ -7,6 +7,13 @@ import pyttsx3
 import threading
 import firebase_admin
 from firebase_admin import credentials, db
+from zoneinfo import ZoneInfo
+import datetime
+
+# ============================
+# TIMEZONE SETUP (MALAYSIA)
+# ============================
+malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
 
 # ============================
 # PUT YOUR GOOGLE API KEY HERE
@@ -64,7 +71,7 @@ def push_live_location(lat, lng):
     ref.set({
         "latitude": lat,
         "longitude": lng,
-        "timestamp": time.time()
+        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
     })
 
 def push_sos(lat, lng):
@@ -72,8 +79,17 @@ def push_sos(lat, lng):
     ref.set({
         "latitude": lat,
         "longitude": lng,
-        "timestamp": time.time()
+        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S"),
+        "active": True
     })
+
+# ============================
+# SOS CLEAR FUNCTION
+# ============================
+def clear_sos():
+    ref = db.reference("sos/active")
+    ref.set(False)
+    print("[Prime]: SOS cleared.")
 
 # ============================
 # REVERSE GEOCODING
@@ -151,8 +167,11 @@ def handle_command(cmd):
 
     elif "sos" in cmd or "help" in cmd:
         send_sos()
-
-
+        
+    elif "clear sos" in cmd or "sos off" in cmd or "stop sos" in cmd:
+        clear_sos()
+        speak("SOS has been cleared.")
+        
 # ============================
 # MAIN PROGRAM START
 # ============================
