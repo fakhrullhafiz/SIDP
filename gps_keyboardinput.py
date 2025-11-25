@@ -7,6 +7,13 @@ import pyttsx3
 import threading
 import firebase_admin
 from firebase_admin import credentials, db
+from zoneinfo import ZoneInfo
+import datetime
+
+# ============================
+# TIMEZONE SETUP (MALAYSIA)
+# ============================
+malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
 
 # ============================
 # PUT YOUR GOOGLE API KEY HERE
@@ -64,7 +71,7 @@ def push_live_location(lat, lng):
     ref.set({
         "latitude": lat,
         "longitude": lng,
-        "timestamp": time.time()
+        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
     })
 
 def push_sos(lat, lng):
@@ -72,8 +79,17 @@ def push_sos(lat, lng):
     ref.set({
         "latitude": lat,
         "longitude": lng,
-        "timestamp": time.time()
+        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S"),
+        "active": True
     })
+
+# ============================
+# SOS CLEAR FUNCTION
+# ============================
+def clear_sos():
+    ref = db.reference("sos/active")
+    ref.set(False)
+    print("[Prime]: SOS cleared.")
 
 # ============================
 # REVERSE GEOCODING
@@ -86,75 +102,11 @@ def reverse_geocode(lat, lng):
         )
         response = requests.get(url)
         data = response.json()
-
-        if data["status"] != "OK":
-            return None, None, None
-
-        results = data["results"]
-
-        # 1. Try exact street first
-        for r in results:
-            if "street_address" in r["types"]:
-                return r["formatted_address"], lat, lng, "reverse"
-
-        # 2. Try nearest road
-        for r in results:
-            if "route" in r["types"]:
-                loc = r["geometry"]["location"]
-                return r["formatted_address"], loc["lat"], loc["lng"], "reverse"
-
-        # If nothing useful → fall back to Places
-        return None, None, None
-
-    except Exception as e:
-        return None, None, None
-
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000  # Earth radius in meters
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
-
-def get_nearest_place(lat, lng, radius=300):
-    try:
-        url = (
-            f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?"
-            f"location={lat},{lng}&radius={radius}&key={API_KEY}"
-        )
-        response = requests.get(url)
-        data = response.json()
-
-        if data["status"] != "OK" or not data.get("results"):
-            return None, None, None, None
-
-        place = data["results"][0]  # nearest
-        name = place["name"]
-        loc = place["geometry"]["location"]
-        return name, loc["lat"], loc["lng"], "places"
-
-    except Exception as e:
-        return None, None, None, None
-
-def get_nearest_address(lat, lng):
-    # FIRST attempt reverse geocoding for streets
-    addr, addr_lat, addr_lng, source = reverse_geocode(lat, lng)
-
-    if addr is not None:
-        dist = haversine(lat, lng, addr_lat, addr_lng)
-        return addr, dist, source
-
-    # If reverse geocode fails → fallback to Places
-    name, p_lat, p_lng, source = get_nearest_place(lat, lng)
-
-    if name is not None:
-        dist = haversine(lat, lng, p_lat, p_lng)
-        return name, dist, source
-
-    return None, None, None
+        if data["status"] == "OK":
+            return data["results"][0]["formatted_address"]
+        return "Unable to determine address"
+    except:
+        return "Reverse geocoding failed"
 
 # ============================
 # SOS FEATURE
@@ -205,29 +157,21 @@ def handle_command(cmd):
         if lat is None:
             speak("No GPS fix.")
             return
-            
-        full_lat = lat
-        full_lng = lng
 
-        lat_speak = round(lat, 3)
-        lng_speak = round(lng, 3)
+        lat = round(lat, 3)
+        lng = round(lng, 3)
 
-        speak(f"Your coordinates are latitude {lat_speak} and longitude {lng_speak}.")
-        name, dist, source = get_nearest_address(full_lat, full_lng)
-
-        if name is None:
-            speak("I cannot find any nearby street or building.")
-        else:
-            meters = round(dist)
-            if source == "reverse":
-                speak(f"You are at or near {name}. Approximately {meters} meters from your GPS point.")
-            elif source == "places":
-                speak(f"The nearest known place is {name}, about {meters} meters away.")
+        speak(f"Your coordinates are latitude {lat} and longitude {lng}.")
+        addr = reverse_geocode(lat, lng)
+        speak(f"You are currently at: {addr}")
 
     elif "sos" in cmd or "help" in cmd:
         send_sos()
-
-
+        
+    elif "clear sos" in cmd or "sos off" in cmd or "stop sos" in cmd:
+        clear_sos()
+        speak("SOS has been cleared.")
+        
 # ============================
 # MAIN PROGRAM START
 # ============================
