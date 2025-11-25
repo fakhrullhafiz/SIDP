@@ -29,13 +29,14 @@ firebase_admin.initialize_app(cred, {
 # ============================
 # TTS ENGINE
 # ============================
-engine = pyttsx3.init()
-engine.setProperty('rate', 160)
-
 def speak(text):
     print(f"[Prime]: {text}")
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 160)
     engine.say(text)
     engine.runAndWait()
+    engine.stop()
+
 
 # ============================
 # SPEECH RECOGNITION
