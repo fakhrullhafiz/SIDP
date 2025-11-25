@@ -56,9 +56,22 @@ def firebase_worker():
             if upload_type is None:
                 break
             if upload_type == "ultrasonic":
-                ultrasonic_db.push(data)
+                # overwrite latest values
+                ultrasonic_db.update({
+                    "distance_cm": data["distance_cm"],
+                    "message": data["message"],
+                    "timestamp": data["timestamp"]
+                })
+                # history
+                ultrasonic_db.child("history").push(data)
             elif upload_type == "objects":
-                object_db.push(data)
+                # overwrite latest values
+                object_db.update({
+                    "objects_detected": data["objects_detected"],
+                    "timestamp": data["timestamp"]
+                })
+                # history
+                object_db.child("history").push(data)
             elif upload_type == "frame":
                 live_stream_db.set(data)
             firebase_queue.task_done()
