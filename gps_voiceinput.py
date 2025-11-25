@@ -41,19 +41,11 @@ def speak(text):
 # SPEECH RECOGNITION
 # ============================
 recognizer = sr.Recognizer()
-mic = None
 
-# Automatically pick the first working microphone
-for index, name in enumerate(sr.Microphone.list_microphone_names()):
-    print(f"[Mic {index}] {name}")
-    if "USB" in name or "Webcam" in name or "Microphone" in name:
-        mic = sr.Microphone(device_index=index)
-        print(f"--> Using mic index {index}: {name}")
-        break
+# FORCE using webcam mic (C920)
+mic = sr.Microphone(device_index=3)
 
-if mic is None:
-    print("No mic found. Using default.")
-    mic = sr.Microphone()
+print("Using microphone: HD Pro Webcam C920 (device index 3)")
 
 # ============================
 # GPS FUNCTION
@@ -209,25 +201,31 @@ def live_tracking_loop():
 # COMMAND HANDLER
 # ============================
 def listen_for_command():
-    with mic as source:
-        recognizer.adjust_for_ambient_noise(source, duration=1)
-        speak("I'm listening.")
-        print("Listening...")
+    try:
+        with mic as source:
+            recognizer.adjust_for_ambient_noise(source, duration=1)
+            speak("I'm listening.")
+            print("Listening...")
 
-        try:
             audio = recognizer.listen(source, timeout=5, phrase_time_limit=6)
-            cmd = recognizer.recognize_google(audio)
-            print(f"[Heard]: {cmd}")
-            return cmd.lower()
-        except sr.WaitTimeoutError:
-            speak("I didn’t catch anything.")
-            return None
-        except sr.UnknownValueError:
-            speak("I could not understand that.")
-            return None
-        except sr.RequestError:
-            speak("Speech recognition service is down.")
-            return None
+
+        cmd = recognizer.recognize_google(audio)
+        print(f"[Heard]: {cmd}")
+        return cmd.lower()
+
+    except sr.WaitTimeoutError:
+        speak("I didn't hear anything.")
+        return None
+    except sr.UnknownValueError:
+        speak("I couldn't understand that.")
+        return None
+    except sr.RequestError:
+        speak("Speech recognition service error.")
+        return None
+    except Exception as e:
+        print("[ERROR]:", e)
+        speak("An error occurred.")
+        return None
 
 def handle_command(cmd):
     if cmd is None:
