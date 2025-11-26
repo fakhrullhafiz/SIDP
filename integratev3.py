@@ -73,7 +73,7 @@ FIREBASE_NODES = {
 # Use BCM numbering if using GPIO.setmode(GPIO.BCM), else BOARD pins if set to BOARD.
 USE_BCM = True
 if USE_BCM:
-    BTN_VOICE_PIN = 17   # Button A - voice / location
+    BTN_VOICE_PIN = 22   # Button A - voice / location
     BTN_SOS_PIN   = 27   # Button B - SOS
     ULTRASOUND_TRIG = 23
     ULTRASOUND_ECHO  = 24
