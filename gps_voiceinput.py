@@ -31,7 +31,7 @@ firebase_admin.initialize_app(cred, {
 # ============================
 def speak(text):
     print(f"[Prime]: {text}")
-    engine = pyttsx3.init()
+    engine = pyttsx3.init(deviceName='espeak')
     engine.setProperty('rate', 160)
     engine.say(text)
     engine.runAndWait()
@@ -44,7 +44,7 @@ def speak(text):
 recognizer = sr.Recognizer()
 
 # FORCE using webcam mic (C920)
-mic = sr.Microphone(device_index=3, sample_rate=16000)
+mic = sr.Microphone(, sample_rate=16000)
 
 print("Using microphone: HD Pro Webcam C920 (device index 3)")
 
