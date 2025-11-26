@@ -53,6 +53,9 @@ CHANNELS = 1
 VOICE_RECORDING = False
 voice_buffer = []
 
+# Button long-press duration
+LONG_PRESS_DURATION = 1.5   # seconds
+
 # YOLO model path (Ultralytics)
 YOLO_MODEL = "yolov8n.pt"  # or your custom model path
 
@@ -437,37 +440,78 @@ def voice_button_watcher():
     global VOICE_RECORDING, voice_buffer
     press_times = []
     last_state = GPIO.input(BTN_VOICE_PIN) if GPIO else 1
+
     while True:
         cur = GPIO.input(BTN_VOICE_PIN) if GPIO else 1
+
+        # Detect button press event
         if last_state == 1 and cur == 0:
-            # button pressed
-            time.sleep(0.12)  # debounce
+            press_start = time.time()
+            time.sleep(0.12)   # debounce
+
+            # Button still held after debounce
             if (GPIO.input(BTN_VOICE_PIN) if GPIO else 1) == 0:
-                press_times.append(time.time())
-                # keep only last 2 presses within 0.6s
-                press_times = [t for t in press_times if time.time() - t < 0.6]
+
+                # ==============================
+                # CASE 1: DURING RECORDING
+                # ==============================
                 if VOICE_RECORDING:
-                    # stop recording and process
+                    # Wait to detect long-press
+                    while (GPIO.input(BTN_VOICE_PIN) == 0) and (time.time() - press_start < LONG_PRESS_DURATION):
+                        time.sleep(0.01)
+
+                    # ---- LONG PRESS CANCEL ----
+                    if (GPIO.input(BTN_VOICE_PIN) == 0) and (time.time() - press_start >= LONG_PRESS_DURATION):
+                        VOICE_RECORDING = False
+                        voice_buffer.clear()
+                        speak("Cancelled.")
+                        press_times.clear()
+                        # wait for release
+                        while GPIO.input(BTN_VOICE_PIN) == 0:
+                            time.sleep(0.01)
+                        last_state = cur
+                        continue
+
+                    # ---- SHORT PRESS STOP RECORDING ----
                     VOICE_RECORDING = False
                     speak("Processing destination.")
                     threading.Thread(target=process_recording_and_set_target, daemon=True).start()
+                    voice_buffer = []
                     press_times.clear()
-                else:
-                    if len(press_times) >= 2:
-                        # double-press -> start recording
-                        VOICE_RECORDING = True
-                        voice_buffer.clear()
-                        speak("Recording. Say your destination and press the button again to stop.")
+                    # wait for release
+                    while GPIO.input(BTN_VOICE_PIN) == 0:
+                        time.sleep(0.01)
+                    last_state = cur
+                    continue
+
+
+                # ==============================
+                # CASE 2: NOT RECORDING YET
+                # ==============================
+                press_times.append(time.time())
+                press_times = [t for t in press_times if time.time() - t < 0.6]
+
+                # --- DOUBLE PRESS → START RECORDING ---
+                if len(press_times) >= 2:
+                    VOICE_RECORDING = True
+                    voice_buffer.clear()
+                    speak("Recording. Say your destination and press again to stop. Long press to cancel.")
+                    press_times.clear()
+                    # wait for release
+                    while GPIO.input(BTN_VOICE_PIN) == 0:
+                        time.sleep(0.01)
+                    last_state = cur
+                    continue
+
+                # --- SINGLE PRESS → GET LOCATION ---
+                def handle_single_press(wait=0.45):
+                    time.sleep(wait)
+                    if not VOICE_RECORDING and len(press_times) == 1:
+                        handle_get_location()
                         press_times.clear()
-                    else:
-                        # single press: defer slightly to detect double press
-                        def single_action(wait=0.45):
-                            time.sleep(wait)
-                            # if still single (no second press), treat as get-location
-                            if not VOICE_RECORDING and (len(press_times) == 1):
-                                handle_get_location()
-                                press_times.clear()
-                        threading.Thread(target=single_action, daemon=True).start()
+
+                threading.Thread(target=handle_single_press, daemon=True).start()
+
         last_state = cur
         time.sleep(0.02)
 
