@@ -15,7 +15,6 @@ import pynmea2
 
 import numpy as np
 import sounddevice as sd
-import wavio
 
 from vosk import Model, KaldiRecognizer
 import cv2
@@ -63,6 +62,12 @@ last_ultra_distance = None
 tts_queue = queue.PriorityQueue()
 stop_tts = False
 
+# VOX mode: when True, device is actively recording user speech — suppress chatter
+VOX_MODE_ACTIVE = False
+
+# YOLO safe distance: only speak YOLO detections if ultrasonic shows an object closer than this (cm)
+SAFE_DISTANCE_YOLO = 300  # 3 meters
+
 # Firebase URL + Key
 FIREBASE_KEY_PATH = "/home/coe/firebase/firebase-key.json"
 FIREBASE_DB_URL = "https://sidp-5fcae-default-rtdb.asia-southeast1.firebasedatabase.app/"
@@ -82,9 +87,8 @@ VOSK_MODEL_PATH = "/home/coe/vosk-model/vosk-model-small-en-us-0.15"
 # GPIO Pins (BCM)
 BTN_VOICE_PIN = 22
 BTN_SOS_PIN   = 27
-ULTRASOUND_TRIG = 17
-ULTRASOUND_ECHO = 18
-
+ULTRASOUND_TRIG = 23
+ULTRASOUND_ECHO = 24
 
 
 # ======================================================
@@ -97,7 +101,6 @@ if GPIO:
     GPIO.setup(BTN_SOS_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(ULTRASOUND_TRIG, GPIO.OUT)
     GPIO.setup(ULTRASOUND_ECHO, GPIO.IN)
-
 
 
 # ======================================================
@@ -121,7 +124,6 @@ except Exception as e:
     fb_refs = {}
 
 fb_queue = queue.Queue(maxsize=200)
-
 
 
 # ======================================================
@@ -156,7 +158,7 @@ def tts_worker():
             if text is None:
                 continue
 
-            # Try pyttsx3
+            # Play text with pyttsx3 or fallback to espeak subprocess
             if use_pyttsx3 and engine is not None:
                 try:
                     engine.say(text)
@@ -178,15 +180,23 @@ tts_thread = threading.Thread(target=tts_worker, daemon=True)
 tts_thread.start()
 
 
-
 # ======================================================
 # ---------------------- SPEAK() -----------------------
 # ======================================================
 
 def speak(text, priority=5):
-    """Queue-based, non-blocking TTS"""
+    """
+    Queue-based non-blocking TTS.
+    Lower priority number = higher urgency (0 = SOS)
+    During VOX_MODE_ACTIVE we suppress low-priority chatter to avoid interrupting recording.
+    """
     try:
-        # Preempt lower-priority messages
+        # During voice recording, suppress low-priority speech
+        if VOX_MODE_ACTIVE and priority > 2:
+            # drop the utterance
+            return
+
+        # Preempt lower-priority messages if this has higher priority
         if not tts_queue.empty():
             current_priority = tts_queue.queue[0][0]
             if priority < current_priority:
@@ -196,7 +206,6 @@ def speak(text, priority=5):
         tts_queue.put((priority, text))
     except Exception as e:
         print("Speak failed:", e)
-
 
 
 # ======================================================
@@ -226,13 +235,11 @@ fb_thread = threading.Thread(target=firebase_worker, daemon=True)
 fb_thread.start()
 
 
-
 def upload_firebase(ref, data):
     try:
         fb_queue.put_nowait((ref, data))
     except:
         pass
-
 
 
 # ======================================================
@@ -246,7 +253,6 @@ try:
 except:
     gps_ser = None
     print("GPS serial unavailable")
-
 
 
 # ======================================================
@@ -351,7 +357,6 @@ def get_nearest_address(lat, lng):
     return None, None, None
 
 
-
 # ======================================================
 # ---------------- GPS LIVE PUSH WORKER ----------------
 # ======================================================
@@ -366,7 +371,6 @@ def gps_push_loop():
         time.sleep(5)
 
 threading.Thread(target=gps_push_loop, daemon=True).start()
-
 
 
 # ======================================================
@@ -404,7 +408,6 @@ def handle_get_location():
             speak(f"Nearest place is {name}, about {meters} meters away.")
 
 
-
 # ======================================================
 # ------------------ AUDIO INPUT/VOSK ------------------
 # ======================================================
@@ -434,7 +437,6 @@ if os.path.exists(VOSK_MODEL_PATH):
         print("Vosk failed to load")
 
 
-
 # ======================================================
 # --------------- PROCESS RECORDED AUDIO ---------------
 # ======================================================
@@ -454,10 +456,11 @@ target_name = None
 
 
 def process_recording_and_set_target():
-    global voice_buffer, target_name
+    global voice_buffer, target_name, VOX_MODE_ACTIVE
 
     if not voice_buffer:
         speak("No audio captured.")
+        VOX_MODE_ACTIVE = False
         return
 
     data = np.concatenate(voice_buffer, axis=0)
@@ -475,6 +478,7 @@ def process_recording_and_set_target():
     if vosk_model is None:
         speak("Speech model unavailable.")
         voice_buffer = []
+        VOX_MODE_ACTIVE = False
         return
 
     rec = KaldiRecognizer(vosk_model, SAMPLE_RATE)
@@ -488,6 +492,9 @@ def process_recording_and_set_target():
     result = json.loads(rec.FinalResult())
     transcript = result.get("text", "")
     voice_buffer = []
+
+    # done recording, unlock VOX
+    VOX_MODE_ACTIVE = False
 
     if not transcript:
         speak("I didn't catch that.")
@@ -506,7 +513,6 @@ def process_recording_and_set_target():
         speak(f"Destination set to {target_name}.")
     else:
         speak(f"{transcript} is not a known target.")
-
 
 
 # ======================================================
@@ -543,7 +549,7 @@ def read_ultrasonic_distance():
 
 
 def ultrasonic_worker():
-    global last_ultra_speak_time, last_ultra_distance
+    global last_ultra_speak_time, last_ultra_distance, VOX_MODE_ACTIVE
 
     while True:
         d = read_ultrasonic_distance()
@@ -554,19 +560,21 @@ def ultrasonic_worker():
                 "timestamp": time.time()
             })
 
-            if d < 80:
-                now = time.time()
+            # Always update last distance so YOLO can reference it
+            # But suppress spoken warnings during VOX_MODE_ACTIVE
+            now = time.time()
 
-                if (
-                    last_ultra_distance is None or
-                    (now - last_ultra_speak_time) > ULTRA_COOLDOWN or
-                    abs(d - last_ultra_distance) > ULTRA_DIFF_THRESHOLD
-                ):
-                    speak(f"Warning {int(d)} centimeters ahead.", priority=2)
-                    last_ultra_speak_time = now
+            if d < 80:
+                if not VOX_MODE_ACTIVE:
+                    if (
+                        last_ultra_distance is None or
+                        (now - last_ultra_speak_time) > ULTRA_COOLDOWN or
+                        abs(d - last_ultra_distance) > ULTRA_DIFF_THRESHOLD
+                    ):
+                        speak(f"Warning {int(d)} centimeters ahead.", priority=2)
+                        last_ultra_speak_time = now
 
                 last_ultra_distance = d
-
             else:
                 last_ultra_distance = None
 
@@ -575,13 +583,12 @@ def ultrasonic_worker():
 threading.Thread(target=ultrasonic_worker, daemon=True).start()
 
 
-
 # ======================================================
 # ------------------ BUTTON WATCHERS -------------------
 # ======================================================
 
 def voice_button_watcher():
-    global VOICE_RECORDING, voice_buffer
+    global VOICE_RECORDING, voice_buffer, VOX_MODE_ACTIVE
 
     press_times = []
     last_state = GPIO.input(BTN_VOICE_PIN) if GPIO else 1
@@ -597,12 +604,14 @@ def voice_button_watcher():
 
                 # ------------------- DURING RECORDING --------------------
                 if VOICE_RECORDING:
+                    # Wait to detect long-press
                     while (GPIO.input(BTN_VOICE_PIN) == 0) and (time.time() - press_start < LONG_PRESS_DURATION):
                         time.sleep(0.01)
 
                     # Long press cancel
                     if (GPIO.input(BTN_VOICE_PIN) == 0) and (time.time() - press_start >= LONG_PRESS_DURATION):
                         VOICE_RECORDING = False
+                        VOX_MODE_ACTIVE = False
                         voice_buffer.clear()
                         speak("Cancelled.")
                         press_times.clear()
@@ -613,6 +622,7 @@ def voice_button_watcher():
 
                     # Short press stop
                     VOICE_RECORDING = False
+                    # Don't unlock VOX_MODE here — processing will unlock when done
                     speak("Processing destination.")
                     threading.Thread(target=process_recording_and_set_target, daemon=True).start()
                     voice_buffer = []
@@ -628,6 +638,7 @@ def voice_button_watcher():
 
                 if len(press_times) >= 2:
                     VOICE_RECORDING = True
+                    VOX_MODE_ACTIVE = True  # enter VOX mode, suppress chatter
                     voice_buffer.clear()
                     speak("Recording. Say your destination and press again to stop. Long press to cancel.")
                     press_times.clear()
@@ -648,7 +659,6 @@ def voice_button_watcher():
         time.sleep(0.02)
 
 threading.Thread(target=voice_button_watcher, daemon=True).start()
-
 
 
 def sos_button_watcher():
@@ -686,7 +696,6 @@ def sos_button_watcher():
         time.sleep(0.02)
 
 threading.Thread(target=sos_button_watcher, daemon=True).start()
-
 
 
 # ======================================================
@@ -761,7 +770,6 @@ def start_mjpeg_server():
 threading.Thread(target=start_mjpeg_server, daemon=True).start()
 
 
-
 # YOLO
 try:
     yolo = YOLO(YOLO_MODEL_PATH)
@@ -771,10 +779,9 @@ except:
     print("YOLO failed to load")
 
 
-
 # CAMERA LOOP
 def camera_loop():
-    global last_detected_objects, last_yolo_speak_time
+    global last_detected_objects, last_yolo_speak_time, last_ultra_distance, VOX_MODE_ACTIVE
 
     last_detection = 0
     detection_interval = 1.0
@@ -790,6 +797,11 @@ def camera_loop():
             continue
 
         mjpeg.update(frame)
+
+        # Skip YOLO entirely while user is speaking/recording
+        if VOX_MODE_ACTIVE:
+            time.sleep(0.02)
+            continue
 
         now = time.time()
         if yolo and (now - last_detection) >= detection_interval:
@@ -810,16 +822,26 @@ def camera_loop():
                     "timestamp": time.time()
                 })
 
+                # If ultrasonic reports no close object, skip vocalizing YOLO
+                # Use last_ultra_distance (cm) if available; if not available, be conservative and skip speaking
+                if last_ultra_distance is None:
+                    # No distance info → do not speak to avoid false alarms
+                    continue
+
+                # If the nearest ultrasonic distance is greater than SAFE_DISTANCE_YOLO => skip talk
+                if last_ultra_distance > SAFE_DISTANCE_YOLO:
+                    continue
+
                 current_set = set(objects)
-                now = time.time()
+                now2 = time.time()
 
                 if current_set and (
                     current_set != last_detected_objects or
-                    (now - last_yolo_speak_time) > YOLO_COOLDOWN
+                    (now2 - last_yolo_speak_time) > YOLO_COOLDOWN
                 ):
                     speak("Detected " + ", ".join(list(current_set)[:3]), priority=5)
                     last_detected_objects = current_set
-                    last_yolo_speak_time = now
+                    last_yolo_speak_time = now2
 
             except Exception as e:
                 print("YOLO error:", e)
@@ -827,7 +849,6 @@ def camera_loop():
         time.sleep(0.02)
 
 threading.Thread(target=camera_loop, daemon=True).start()
-
 
 
 # ======================================================
