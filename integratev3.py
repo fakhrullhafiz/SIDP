@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import io
 import sys
@@ -12,56 +13,40 @@ import datetime
 import requests
 import pynmea2
 
-# Sound / STT / TTS
-import sounddevice as sd
 import numpy as np
+import sounddevice as sd
 import wavio
-from vosk import Model, KaldiRecognizer
 
-# Camera / vision
+from vosk import Model, KaldiRecognizer
 import cv2
 from ultralytics import YOLO
 
-# Firebase
 import firebase_admin
 from firebase_admin import credentials, db
 
-# GPIO / hardware (Raspberry Pi)
+# GPIO (Raspberry Pi)
 try:
     import RPi.GPIO as GPIO
-except Exception:
+except:
     GPIO = None
-    print("Warning: RPi.GPIO not available. Running in non-hardware mode.")
+    print("Warning: GPIO unavailable")
 
-# ---------------------------
-# ----- CONFIG -------------
-# ---------------------------
-# Edit these paths
-FIREBASE_KEY_PATH = "/home/coe/firebase/firebase-key.json"
-FIREBASE_DB_URL = "https://sidp-5fcae-default-rtdb.asia-southeast1.firebasedatabase.app/"
-VOSK_MODEL_PATH = "/home/coe/vosk-model/vosk-model-small-en-us-0.15"
 
-# Google API key for reverse geocoding + places (from gpstest)
-API_KEY = "AIzaSyC3wbCxpdu5gBjjixsDlIR1N-hFSgR2xp4"
+# ======================================================
+# ----------------- GLOBAL CONSTANTS -------------------
+# ======================================================
 
-# GPS serial port used in gpstest
-GPS_SERIAL_PORT = "/dev/serial0"
-
-# Audio / VOSK config
 SAMPLE_RATE = 16000
 CHANNELS = 1
 VOICE_RECORDING = False
 voice_buffer = []
 
-# Cache last known valid GPS coordinates
+# Long press threshold for cancel
+LONG_PRESS_DURATION = 1.5
+
+# GPS last known cached coordinates
 last_lat = None
 last_lng = None
-
-# ========================================
-# TTS GLOBALS
-# ========================================
-tts_queue = queue.PriorityQueue()
-stop_tts = False
 
 # YOLO spam reduction
 last_detected_objects = set()
@@ -70,146 +55,114 @@ YOLO_COOLDOWN = 5  # seconds
 
 # Ultrasonic spam reduction
 last_ultra_speak_time = 0
-ULTRA_COOLDOWN = 3   # seconds
-ULTRA_DIFF_THRESHOLD = 8   # cm movement needed to speak again
+ULTRA_COOLDOWN = 3  # seconds
+ULTRA_DIFF_THRESHOLD = 8  # cm threshold for new warning
 last_ultra_distance = None
 
-# Button long-press duration
-LONG_PRESS_DURATION = 1.5   # seconds
+# TTS globals
+tts_queue = queue.PriorityQueue()
+stop_tts = False
 
-# YOLO model path (Ultralytics)
-YOLO_MODEL = "yolov8n.pt"  # or your custom model path
+# Firebase URL + Key
+FIREBASE_KEY_PATH = "/home/coe/firebase/firebase-key.json"
+FIREBASE_DB_URL = "https://sidp-5fcae-default-rtdb.asia-southeast1.firebasedatabase.app/"
 
-# Firebase nodes (will be created/used)
-FIREBASE_NODES = {
-    "ultrasonic": "ultrasonicDB",
-    "objects": "objectDetectionDB",
-    "frame": "liveStreamDB",
-    "device": "deviceStatus",
-    "gps": "gpsDB",
-    "sos": "sos"
-}
+# Google API Key
+API_KEY = "AIzaSyC3wbCxpdu5gBjjixsDlIR1N-hFSgR2xp4"
 
-# GPIO pins (change to your wiring)
-# Use BCM numbering if using GPIO.setmode(GPIO.BCM), else BOARD pins if set to BOARD.
-USE_BCM = True
-if USE_BCM:
-    BTN_VOICE_PIN = 22   # Button A - voice / location
-    BTN_SOS_PIN   = 27   # Button B - SOS
-    ULTRASOUND_TRIG = 23
-    ULTRASOUND_ECHO  = 24
-else:
-    BTN_VOICE_PIN = 16
-    BTN_SOS_PIN   = 18
-    ULTRASOUND_TRIG = 11
-    ULTRASOUND_ECHO  = 12
+# GPS serial port
+GPS_SERIAL_PORT = "/dev/serial0"
 
-# MJPEG streaming config
-MJPEG_PORT = 8081
+# YOLO Model
+YOLO_MODEL_PATH = "yolov8n.pt"
 
-# Misc
-GPS_PUSH_INTERVAL = 5  # seconds for live GPS pushes
+# Vosk model path
+VOSK_MODEL_PATH = "/home/coe/vosk-model/vosk-model-small-en-us-0.15"
 
-# ---------------------------
-# ----- INITIALIZATION ------
-# ---------------------------
-# Firebase init
+# GPIO Pins (BCM)
+BTN_VOICE_PIN = 22
+BTN_SOS_PIN   = 27
+ULTRASOUND_TRIG = 17
+ULTRASOUND_ECHO = 18
+
+
+
+# ======================================================
+# -------------------- GPIO INIT -----------------------
+# ======================================================
+
+if GPIO:
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(BTN_VOICE_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(BTN_SOS_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(ULTRASOUND_TRIG, GPIO.OUT)
+    GPIO.setup(ULTRASOUND_ECHO, GPIO.IN)
+
+
+
+# ======================================================
+# ------------------ FIREBASE INIT ---------------------
+# ======================================================
+
 try:
     cred = credentials.Certificate(FIREBASE_KEY_PATH)
     firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
-    db_refs = {k: db.reference(v) for k, v in FIREBASE_NODES.items()}
-    print("Firebase initialized.")
+    fb_refs = {
+        "ultrasonic": db.reference("ultrasonicDB"),
+        "objects": db.reference("objectDetectionDB"),
+        "frame": db.reference("liveStreamDB"),
+        "gps": db.reference("gpsDB"),
+        "sos": db.reference("sosDB"),
+        "device": db.reference("deviceStatus")
+    }
+    print("Firebase initialized")
 except Exception as e:
     print("Firebase init error:", e)
-    db_refs = {}
+    fb_refs = {}
 
-# GPS serial
-try:
-    import serial
-    gps_ser = serial.Serial(GPS_SERIAL_PORT, baudrate=9600, timeout=1)
-    print("GPS serial opened:", GPS_SERIAL_PORT)
-except Exception as e:
-    print("GPS serial init error:", e)
-    gps_ser = None
+fb_queue = queue.Queue(maxsize=200)
 
-# VOSK model
-vosk_model = None
-if os.path.exists(VOSK_MODEL_PATH):
-    try:
-        vosk_model = Model(VOSK_MODEL_PATH)
-        print("Loaded Vosk model.")
-    except Exception as e:
-        print("Vosk model load error:", e)
-else:
-    print("Vosk model path not found:", VOSK_MODEL_PATH)
 
-# YOLO model
-try:
-    yolo = YOLO(YOLO_MODEL)
-    print("YOLO model loaded:", YOLO_MODEL)
-except Exception as e:
-    print("YOLO model load error:", e)
-    yolo = None
 
-# Audio input stream (sounddevice)
-audio_stream = None
-try:
-    def audio_cb(indata, frames, time_info, status):
-        global VOICE_RECORDING, voice_buffer
-        if VOICE_RECORDING:
-            voice_buffer.append(indata.copy())
+# ======================================================
+# ------------------ TTS ENGINE INIT -------------------
+# ======================================================
 
-    audio_stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, callback=audio_cb)
-    audio_stream.start()
-    print("Audio input stream started.")
-except Exception as e:
-    print("Audio stream init error:", e)
-    audio_stream = None
-
-# GPIO setup
-if GPIO:
-    if USE_BCM:
-        GPIO.setmode(GPIO.BCM)
-    else:
-        GPIO.setmode(GPIO.BOARD)
-    GPIO.setup(BTN_VOICE_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(BTN_SOS_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    if ULTRASOUND_TRIG and ULTRASOUND_ECHO:
-        GPIO.setup(ULTRASOUND_TRIG, GPIO.OUT)
-        GPIO.setup(ULTRASOUND_ECHO, GPIO.IN)
-
-# TTS (pyttsx3 preferred, fallback to espeak)
 use_pyttsx3 = False
 try:
     import pyttsx3
-    # prefer espeak backend on Linux
     try:
         engine = pyttsx3.init(driverName='espeak')
-    except Exception:
+    except:
         engine = pyttsx3.init()
-    engine.setProperty('rate', 160)
+    engine.setProperty("rate", 165)
+    engine.setProperty("volume", 1.0)
     use_pyttsx3 = True
-    print("pyttsx3 TTS ready.")
-except Exception:
+    print("pyttsx3 initialized")
+except:
     engine = None
-    print("pyttsx3 not available; will use espeak via subprocess.")
+    print("pyttsx3 unavailable — using espeak fallback")
+
+
+# ======================================================
+# ------------------- TTS WORKER -----------------------
+# ======================================================
 
 def tts_worker():
     global stop_tts
-
     while not stop_tts:
         try:
             priority, text = tts_queue.get(timeout=1)
-
             if text is None:
                 continue
 
+            # Try pyttsx3
             if use_pyttsx3 and engine is not None:
                 try:
                     engine.say(text)
                     engine.runAndWait()
                 except Exception as e:
-                    print("pyttsx3 failed, switching to espeak:", e)
+                    print("TTS engine error, switching to espeak:", e)
                     subprocess.run(["espeak", text], check=False)
             else:
                 subprocess.run(["espeak", text], check=False)
@@ -220,14 +173,18 @@ def tts_worker():
             continue
         except Exception as e:
             print("TTS worker error:", e)
-            continue
 
-# Start the TTS worker thread
 tts_thread = threading.Thread(target=tts_worker, daemon=True)
 tts_thread.start()
 
-# Short TTS wrapper
+
+
+# ======================================================
+# ---------------------- SPEAK() -----------------------
+# ======================================================
+
 def speak(text, priority=5):
+    """Queue-based, non-blocking TTS"""
     try:
         # Preempt lower-priority messages
         if not tts_queue.empty():
@@ -238,12 +195,13 @@ def speak(text, priority=5):
 
         tts_queue.put((priority, text))
     except Exception as e:
-        print("Failed to queue TTS:", e)
+        print("Speak failed:", e)
 
-# ---------------------------
-# ----- FIREBASE QUEUE ------
-# ---------------------------
-fb_queue = queue.Queue(maxsize=200)
+
+
+# ======================================================
+# ------------------ FIREBASE WORKER -------------------
+# ======================================================
 
 def firebase_worker():
     while True:
@@ -251,153 +209,339 @@ def firebase_worker():
             item = fb_queue.get()
             if item is None:
                 break
-            typ, data = item
-            try:
-                if typ in db_refs:
-                    db_refs[typ].set(data)
-                    # push history entry if desired
-                    try:
-                        db_refs[typ].child("history").push(data)
-                    except Exception:
-                        pass
-            except Exception as e:
-                print("Firebase push error:", e)
+
+            ref_name, data = item
+            if ref_name in fb_refs:
+                fb_refs[ref_name].set(data)
+                try:
+                    fb_refs[ref_name].child("history").push(data)
+                except:
+                    pass
+
             fb_queue.task_done()
-        except Exception:
-            time.sleep(0.1)
+        except:
+            continue
 
 fb_thread = threading.Thread(target=firebase_worker, daemon=True)
 fb_thread.start()
 
-def upload_firebase(typ, data):
+
+
+def upload_firebase(ref, data):
     try:
-        fb_queue.put_nowait((typ, data))
-    except Exception:
+        fb_queue.put_nowait((ref, data))
+    except:
         pass
 
-# ---------------------------
-# ----- GPS / GEOCODE -------
-# ---------------------------
+
+
+# ======================================================
+# -------------------- GPS INIT ------------------------
+# ======================================================
+
+try:
+    import serial
+    gps_ser = serial.Serial(GPS_SERIAL_PORT, baudrate=9600, timeout=1)
+    print("GPS serial opened")
+except:
+    gps_ser = None
+    print("GPS serial unavailable")
+
+
+
+# ======================================================
+# ------------------- GPS FUNCTIONS --------------------
+# ======================================================
+
 def get_gps_coordinates(timeout=10):
     if gps_ser is None:
         return None, None
+
     start = time.time()
     while time.time() - start < timeout:
         try:
             line = gps_ser.readline().decode('ascii', errors='replace').strip()
-            if line.startswith('$GPGGA') or line.startswith('$GPRMC'):
+            if line.startswith("$GPGGA") or line.startswith("$GPRMC"):
                 msg = pynmea2.parse(line)
                 lat = getattr(msg, 'latitude', None)
-                lon = getattr(msg, 'longitude', None)
-                if lat and lon:
-                    return lat, lon
-        except Exception:
+                lng = getattr(msg, 'longitude', None)
+                if lat and lng:
+                    return lat, lng
+        except:
             continue
+
     return None, None
 
+
 def push_live_location(lat, lng):
-    payload = {"latitude": lat, "longitude": lng, "timestamp": time.time()}
-    upload_firebase("gps", payload)
+    data = {"latitude": lat, "longitude": lng, "timestamp": time.time()}
+    upload_firebase("gps", data)
+
 
 def push_sos(lat, lng):
-    payload = {"latitude": lat, "longitude": lng, "timestamp": time.time()}
-    upload_firebase("sos", payload)
+    data = {"latitude": lat, "longitude": lng, "timestamp": time.time()}
+    upload_firebase("sos", data)
+
 
 def reverse_geocode(lat, lng):
     try:
-        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&key={API_KEY}"
+        url = (f"https://maps.googleapis.com/maps/api/geocode/json?"
+               f"latlng={lat},{lng}&key={API_KEY}")
         r = requests.get(url, timeout=8)
         j = r.json()
+
         if j.get("status") != "OK":
             return None, None, None
+
         results = j.get("results", [])
+
         for res in results:
             if "street_address" in res.get("types", []):
                 return res.get("formatted_address"), lat, lng, "reverse"
+
         for res in results:
             if "route" in res.get("types", []):
-                geom = res.get("geometry", {}).get("location", {})
-                return res.get("formatted_address"), geom.get("lat"), geom.get("lng"), "reverse"
+                loc = res["geometry"]["location"]
+                return res["formatted_address"], loc["lat"], loc["lng"], "reverse"
+
         return None, None, None
-    except Exception:
+    except:
         return None, None, None
+
 
 def get_nearest_place(lat, lng, radius=300):
     try:
-        url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius={radius}&key={API_KEY}"
+        url = (f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?"
+               f"location={lat},{lng}&radius={radius}&key={API_KEY}")
         r = requests.get(url, timeout=8)
         j = r.json()
+
         if j.get("status") != "OK" or not j.get("results"):
             return None, None, None, None
+
         place = j["results"][0]
         name = place.get("name")
-        geom = place.get("geometry", {}).get("location", {})
-        return name, geom.get("lat"), geom.get("lng"), "places"
-    except Exception:
+        loc = place["geometry"]["location"]
+        return name, loc["lat"], loc["lng"], "places"
+    except:
         return None, None, None, None
 
+
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000.0
+    R = 6371000
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    dlamb = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlamb/2)**2
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
+
 def get_nearest_address(lat, lng):
-    addr, a_lat, a_lng, source = reverse_geocode(lat, lng)
+    addr, al, ln, source = reverse_geocode(lat, lng)
     if addr:
-        dist = haversine(lat, lng, a_lat, a_lng)
+        dist = haversine(lat, lng, al, ln)
         return addr, dist, source
-    name, p_lat, p_lng, source = get_nearest_place(lat, lng)
+
+    name, pl, pn, source = get_nearest_place(lat, lng)
     if name:
-        dist = haversine(lat, lng, p_lat, p_lng)
+        dist = haversine(lat, lng, pl, pn)
         return name, dist, source
+
     return None, None, None
 
-# Start background GPS live push thread
+
+
+# ======================================================
+# ---------------- GPS LIVE PUSH WORKER ----------------
+# ======================================================
+
 def gps_push_loop():
+    global last_lat, last_lng
     while True:
         lat, lng = get_gps_coordinates(timeout=10)
-        global last_lat, last_lng
         if lat is not None:
-            last_lat = lat
-            last_lng = lng
+            last_lat, last_lng = lat, lng
             push_live_location(lat, lng)
-        time.sleep(GPS_PUSH_INTERVAL)
+        time.sleep(5)
 
-gps_thread = threading.Thread(target=gps_push_loop, daemon=True)
-gps_thread.start()
+threading.Thread(target=gps_push_loop, daemon=True).start()
 
-# ---------------------------
-# ----- ULTRASONIC SENSOR ---
-# ---------------------------
+
+
+# ======================================================
+# ------------------- HANDLE LOCATION ------------------
+# ======================================================
+
+def handle_get_location():
+    global last_lat, last_lng
+
+    lat, lng = get_gps_coordinates(timeout=10)
+
+    if lat is None:
+        if last_lat is not None and last_lng is not None:
+            lat, lng = last_lat, last_lng
+            speak("Using last known location.")
+        else:
+            speak("No GPS fix and no previous location available.")
+            return
+
+    last_lat, last_lng = lat, lng
+
+    s_lat = round(lat, 3)
+    s_lng = round(lng, 3)
+    speak(f"Your coordinates are latitude {s_lat} and longitude {s_lng}.")
+
+    name, dist, source = get_nearest_address(lat, lng)
+
+    if name is None:
+        speak("I cannot find any nearby street or building.")
+    else:
+        meters = round(dist)
+        if source == "reverse":
+            speak(f"You are near {name}, about {meters} meters away.")
+        else:
+            speak(f"Nearest place is {name}, about {meters} meters away.")
+
+
+
+# ======================================================
+# ------------------ AUDIO INPUT/VOSK ------------------
+# ======================================================
+
+def audio_callback(indata, frames, time_info, status):
+    if VOICE_RECORDING:
+        voice_buffer.append(indata.copy())
+
+try:
+    audio_stream = sd.InputStream(
+        samplerate=SAMPLE_RATE,
+        channels=CHANNELS,
+        callback=audio_callback
+    )
+    audio_stream.start()
+except:
+    audio_stream = None
+    print("Audio stream init failed")
+
+
+vosk_model = None
+if os.path.exists(VOSK_MODEL_PATH):
+    try:
+        vosk_model = Model(VOSK_MODEL_PATH)
+        print("Vosk model loaded")
+    except:
+        print("Vosk failed to load")
+
+
+
+# ======================================================
+# --------------- PROCESS RECORDED AUDIO ---------------
+# ======================================================
+
+object_map = {
+    "person": "person",
+    "man": "person",
+    "woman": "person",
+    "car": "car",
+    "stop sign": "stop sign",
+    "chair": "chair",
+    "dog": "dog",
+    "cat": "cat"
+}
+
+target_name = None
+
+
+def process_recording_and_set_target():
+    global voice_buffer, target_name
+
+    if not voice_buffer:
+        speak("No audio captured.")
+        return
+
+    data = np.concatenate(voice_buffer, axis=0)
+    int16 = (data * 32767).astype(np.int16).flatten()
+
+    mem = io.BytesIO()
+    wf = wave.open(mem, 'wb')
+    wf.setnchannels(CHANNELS)
+    wf.setsampwidth(2)
+    wf.setframerate(SAMPLE_RATE)
+    wf.writeframes(int16.tobytes())
+    wf.close()
+    mem.seek(0)
+
+    if vosk_model is None:
+        speak("Speech model unavailable.")
+        voice_buffer = []
+        return
+
+    rec = KaldiRecognizer(vosk_model, SAMPLE_RATE)
+
+    while True:
+        chunk = mem.read(4096)
+        if not chunk:
+            break
+        rec.AcceptWaveform(chunk)
+
+    result = json.loads(rec.FinalResult())
+    transcript = result.get("text", "")
+    voice_buffer = []
+
+    if not transcript:
+        speak("I didn't catch that.")
+        return
+
+    transcript = transcript.lower()
+
+    detected = None
+    for key, val in object_map.items():
+        if key in transcript:
+            detected = val
+            break
+
+    if detected:
+        target_name = detected
+        speak(f"Destination set to {target_name}.")
+    else:
+        speak(f"{transcript} is not a known target.")
+
+
+
+# ======================================================
+# ------------------- ULTRASONIC WORKER ----------------
+# ======================================================
+
 def read_ultrasonic_distance():
-    # Very simple HC-SR04 reading; ensure wiring uses 3.3V or proper level shifting
     if GPIO is None:
         return None
+
     try:
         GPIO.output(ULTRASOUND_TRIG, False)
-        time.sleep(0.05)
+        time.sleep(0.0002)
+
         GPIO.output(ULTRASOUND_TRIG, True)
         time.sleep(0.00001)
         GPIO.output(ULTRASOUND_TRIG, False)
+
         pulse_start = time.time()
         timeout = pulse_start + 0.02
         while GPIO.input(ULTRASOUND_ECHO) == 0 and time.time() < timeout:
             pulse_start = time.time()
+
         pulse_end = time.time()
         timeout = pulse_end + 0.02
         while GPIO.input(ULTRASOUND_ECHO) == 1 and time.time() < timeout:
             pulse_end = time.time()
+
         pulse_duration = pulse_end - pulse_start
-        distance_cm = pulse_duration * 34300 / 2
-        return distance_cm
-    except Exception:
+        distance = pulse_duration * 34300 / 2
+        return distance
+    except:
         return None
 
-# Ultrasonic background worker (push to firebase)
+
 def ultrasonic_worker():
     global last_ultra_speak_time, last_ultra_distance
 
@@ -405,17 +549,14 @@ def ultrasonic_worker():
         d = read_ultrasonic_distance()
 
         if d is not None:
-            payload = {"distance_cm": d, "timestamp": time.time()}
-            upload_firebase("ultrasonic", payload)
+            upload_firebase("ultrasonic", {
+                "distance_cm": d,
+                "timestamp": time.time()
+            })
 
             if d < 80:
-
                 now = time.time()
 
-                # Speak if:
-                # 1. First warning OR
-                # 2. Cooldown passed OR
-                # 3. Distance changed significantly
                 if (
                     last_ultra_distance is None or
                     (now - last_ultra_speak_time) > ULTRA_COOLDOWN or
@@ -427,301 +568,217 @@ def ultrasonic_worker():
                 last_ultra_distance = d
 
             else:
-                last_ultra_distance = None  # Reset when obstacle is gone
+                last_ultra_distance = None
 
         time.sleep(0.5)
 
-ultra_thread = threading.Thread(target=ultrasonic_worker, daemon=True)
-ultra_thread.start()
+threading.Thread(target=ultrasonic_worker, daemon=True).start()
 
-# ---------------------------
-# ----- VOICE BUTTONS ------
-# ---------------------------
-def handle_get_location():
-    global last_lat, last_lng
 
-    # Try to get live GPS fix
-    lat, lng = get_gps_coordinates(timeout=10)
 
-    # If live fix fails → use cached location
-    if lat is None:
-        if last_lat is not None and last_lng is not None:
-            lat, lng = last_lat, last_lng
-            speak("Using last known location.")
-        else:
-            speak("No GPS fix and no previous location available.")
-            return
+# ======================================================
+# ------------------ BUTTON WATCHERS -------------------
+# ======================================================
 
-    # Update cache (optional but safe)
-    last_lat, last_lng = lat, lng
-
-    # Speak raw coordinates (rounded)
-    s_lat = round(lat, 3)
-    s_lng = round(lng, 3)
-    speak(f"Your coordinates are latitude {s_lat} and longitude {s_lng}.")
-
-    # Reverse geocode or Places fallback
-    name, dist, source = get_nearest_address(lat, lng)
-
-    if name is None:
-        speak("I cannot find any nearby street or building.")
-    else:
-        meters = round(dist)
-        if source == "reverse":
-            speak(f"You are at or near {name}. Approximately {meters} meters away.")
-        else:
-            speak(f"The nearest known place is {name}, about {meters} meters away.")
-
-def process_recording_and_set_target():
-    global voice_buffer
-    if not voice_buffer:
-        speak("No audio captured.")
-        return
-    # convert buffer to bytes and run Vosk
-    audio = np.concatenate(voice_buffer, axis=0)
-    int16 = (audio * 32767).astype(np.int16).flatten()
-    mem = io.BytesIO()
-    wf = wave.open(mem, 'wb')
-    wf.setnchannels(CHANNELS)
-    wf.setsampwidth(2)
-    wf.setframerate(SAMPLE_RATE)
-    wf.writeframes(int16.tobytes())
-    wf.close()
-    mem.seek(0)
-    if vosk_model is None:
-        speak("Speech model not available.")
-        voice_buffer = []
-        return
-    rec = KaldiRecognizer(vosk_model, SAMPLE_RATE)
-    while True:
-        chunk = mem.read(4096)
-        if not chunk:
-            break
-        rec.AcceptWaveform(chunk)
-    result = json.loads(rec.FinalResult())
-    transcript = result.get("text", "")
-    mem.close()
-    voice_buffer = []
-    if not transcript:
-        speak("I didn't catch that. Try again.")
-        return
-    # map to allowed classes (simple mapping)
-    mapping = {
-        "chair": "chair",
-        "person": "person",
-        "man": "person",
-        "woman": "person",
-        "car": "car",
-        "dog": "dog",
-        "cat": "cat",
-        "stop sign": "stop sign"
-    }
-    dest = None
-    for k, v in mapping.items():
-        if k in transcript.lower():
-            dest = v
-            break
-    if not dest:
-        speak(f"{transcript} is not a known destination.")
-        return
-    # set the target (simple global)
-    global target_name
-    target_name = dest
-    speak(f"Destination set to {target_name}.")
-
-# Button watcher: implements the Phase 1 and recorded double-press logic for voice
 def voice_button_watcher():
     global VOICE_RECORDING, voice_buffer
+
     press_times = []
     last_state = GPIO.input(BTN_VOICE_PIN) if GPIO else 1
 
     while True:
         cur = GPIO.input(BTN_VOICE_PIN) if GPIO else 1
 
-        # Detect button press event
         if last_state == 1 and cur == 0:
             press_start = time.time()
-            time.sleep(0.12)   # debounce
+            time.sleep(0.12)
 
-            # Button still held after debounce
             if (GPIO.input(BTN_VOICE_PIN) if GPIO else 1) == 0:
 
-                # ==============================
-                # CASE 1: DURING RECORDING
-                # ==============================
+                # ------------------- DURING RECORDING --------------------
                 if VOICE_RECORDING:
-                    # Wait to detect long-press
                     while (GPIO.input(BTN_VOICE_PIN) == 0) and (time.time() - press_start < LONG_PRESS_DURATION):
                         time.sleep(0.01)
 
-                    # ---- LONG PRESS CANCEL ----
+                    # Long press cancel
                     if (GPIO.input(BTN_VOICE_PIN) == 0) and (time.time() - press_start >= LONG_PRESS_DURATION):
                         VOICE_RECORDING = False
                         voice_buffer.clear()
                         speak("Cancelled.")
                         press_times.clear()
-                        # wait for release
                         while GPIO.input(BTN_VOICE_PIN) == 0:
                             time.sleep(0.01)
                         last_state = cur
                         continue
 
-                    # ---- SHORT PRESS STOP RECORDING ----
+                    # Short press stop
                     VOICE_RECORDING = False
                     speak("Processing destination.")
                     threading.Thread(target=process_recording_and_set_target, daemon=True).start()
                     voice_buffer = []
                     press_times.clear()
-                    # wait for release
                     while GPIO.input(BTN_VOICE_PIN) == 0:
                         time.sleep(0.01)
                     last_state = cur
                     continue
 
-
-                # ==============================
-                # CASE 2: NOT RECORDING YET
-                # ==============================
+                # ------------------- NOT RECORDING -----------------------
                 press_times.append(time.time())
                 press_times = [t for t in press_times if time.time() - t < 0.6]
 
-                # --- DOUBLE PRESS → START RECORDING ---
                 if len(press_times) >= 2:
                     VOICE_RECORDING = True
                     voice_buffer.clear()
                     speak("Recording. Say your destination and press again to stop. Long press to cancel.")
                     press_times.clear()
-                    # wait for release
                     while GPIO.input(BTN_VOICE_PIN) == 0:
                         time.sleep(0.01)
                     last_state = cur
                     continue
 
-                # --- SINGLE PRESS → GET LOCATION ---
-                def handle_single_press(wait=0.45):
+                def single_press(wait=0.45):
                     time.sleep(wait)
                     if not VOICE_RECORDING and len(press_times) == 1:
                         handle_get_location()
                         press_times.clear()
 
-                threading.Thread(target=handle_single_press, daemon=True).start()
+                threading.Thread(target=single_press, daemon=True).start()
 
         last_state = cur
         time.sleep(0.02)
 
-# SOS button watcher - single press sends SOS using GPS
+threading.Thread(target=voice_button_watcher, daemon=True).start()
+
+
+
 def sos_button_watcher():
+    global last_lat, last_lng
+
     last_state = GPIO.input(BTN_SOS_PIN) if GPIO else 1
+
     while True:
         cur = GPIO.input(BTN_SOS_PIN) if GPIO else 1
+
         if last_state == 1 and cur == 0:
             time.sleep(0.12)
+
             if (GPIO.input(BTN_SOS_PIN) if GPIO else 1) == 0:
-                speak("SOS activated. Sending emergency alert now.")
-                
-                global last_lat, last_lng
+                speak("SOS activated. Sending emergency alert now.", priority=0)
+
                 lat, lng = get_gps_coordinates(timeout=10)
-                
-                # GPS fail? → Use cached GPS
+
                 if lat is None:
                     if last_lat is not None and last_lng is not None:
                         lat, lng = last_lat, last_lng
                         speak("Using last known GPS fix for SOS.")
                     else:
-                        speak("No GPS fix. SOS not sent.")
-                        # exit SOS handler
+                        speak("No GPS fix. SOS not sent.", priority=0)
                         last_state = cur
                         time.sleep(0.02)
                         continue
-                
-                # Now we have valid coordinates (fresh or cached)
+
                 push_sos(lat, lng)
                 s_lat = round(lat, 3)
                 s_lng = round(lng, 3)
-                speak(f"SOS sent. Coordinates {s_lat}, {s_lng}")
+                speak(f"SOS sent. Coordinates {s_lat}, {s_lng}", priority=0)
 
         last_state = cur
         time.sleep(0.02)
 
-# start button threads
-if GPIO:
-    threading.Thread(target=voice_button_watcher, daemon=True).start()
-    threading.Thread(target=sos_button_watcher, daemon=True).start()
-else:
-    print("GPIO not available — button watchers disabled (for desktop testing).")
+threading.Thread(target=sos_button_watcher, daemon=True).start()
 
-# ---------------------------
-# ----- CAMERA / YOLO -------
-# ---------------------------
+
+
+# ======================================================
+# ------------------ CAMERA / YOLO LOOP ----------------
+# ======================================================
+
 cap = None
 try:
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    print("Camera opened.")
-except Exception as e:
-    print("Camera open error:", e)
+except:
     cap = None
 
-# MJPEG streaming server (simple)
-class MJPEGHandler:
+
+class MJPEGStream:
     def __init__(self):
         self.frame = None
         self.lock = threading.Lock()
 
-    def set(self, f):
+    def update(self, frame):
         with self.lock:
-            self.frame = f
+            self.frame = frame.copy()
 
     def get_jpeg(self):
         with self.lock:
             if self.frame is None:
                 return None
-            ret, jpg = cv2.imencode('.jpg', self.frame)
-            if not ret:
-                return None
-            return jpg.tobytes()
+            ret, jpg = cv2.imencode(".jpg", self.frame)
+            return jpg.tobytes() if ret else None
 
-mjpeg = MJPEGHandler()
 
+mjpeg = MJPEGStream()
+
+
+# MJPEG Server
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 class StreamHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != '/stream':
+        if self.path != "/stream":
             self.send_error(404)
             return
+
         self.send_response(200)
-        self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header("Content-type", "multipart/x-mixed-replace; boundary=frame")
         self.end_headers()
+
         try:
             while True:
-                frame = mjpeg.get_jpeg()
-                if frame:
+                jpg = mjpeg.get_jpeg()
+                if jpg:
                     self.wfile.write(b"--frame\r\n")
-                    self.send_header('Content-Type', 'image/jpeg')
-                    self.send_header('Content-Length', str(len(frame)))
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Content-Length", str(len(jpg)))
                     self.end_headers()
-                    self.wfile.write(frame)
-                    self.wfile.write(b'\r\n')
+                    self.wfile.write(jpg)
+                    self.wfile.write(b"\r\n")
                 time.sleep(0.05)
-        except Exception:
+        except:
             pass
+
 
 def start_mjpeg_server():
     try:
-        server = HTTPServer(('', MJPEG_PORT), StreamHandler)
-        print("Starting MJPEG server on port", MJPEG_PORT)
+        server = HTTPServer(("", 8081), StreamHandler)
+        print("MJPEG server running at port 8081")
         server.serve_forever()
     except Exception as e:
         print("MJPEG server error:", e)
 
 threading.Thread(target=start_mjpeg_server, daemon=True).start()
 
-# Detection loop: capture frame, run YOLO occasionally, push to firebase
+
+
+# YOLO
+try:
+    yolo = YOLO(YOLO_MODEL_PATH)
+    print("YOLO model loaded")
+except:
+    yolo = None
+    print("YOLO failed to load")
+
+
+
+# CAMERA LOOP
 def camera_loop():
+    global last_detected_objects, last_yolo_speak_time
+
     last_detection = 0
-    detection_interval = 1.0  # seconds
+    detection_interval = 1.0
+
     while True:
         if cap is None or not cap.isOpened():
             time.sleep(1)
@@ -732,16 +789,14 @@ def camera_loop():
             time.sleep(0.01)
             continue
 
-        # send frame for MJPEG streaming
-        mjpeg.set(frame)
+        mjpeg.update(frame)
 
-        # run YOLO every detection_interval
         now = time.time()
         if yolo and (now - last_detection) >= detection_interval:
             last_detection = now
+
             try:
                 results = yolo.predict(frame, imgsz=640, conf=0.35, max_det=10)
-                global last_detected_objects, last_yolo_speak_time
 
                 objects = []
                 for res in results:
@@ -750,19 +805,14 @@ def camera_loop():
                         label = res.names.get(cls, str(cls))
                         objects.append(label)
 
-                # Upload to firebase unchanged
                 upload_firebase("objects", {
                     "objects_detected": objects,
                     "timestamp": time.time()
                 })
 
-                # Convert to sets for comparison
                 current_set = set(objects)
                 now = time.time()
 
-                # --- Speak only if:
-                # 1) New Objects appear
-                # 2) 5 seconds passed since last speak
                 if current_set and (
                     current_set != last_detected_objects or
                     (now - last_yolo_speak_time) > YOLO_COOLDOWN
@@ -772,45 +822,37 @@ def camera_loop():
                     last_yolo_speak_time = now
 
             except Exception as e:
-                print("YOLO predict error:", e)
+                print("YOLO error:", e)
 
         time.sleep(0.02)
 
-cam_thread = threading.Thread(target=camera_loop, daemon=True)
-cam_thread.start()
+threading.Thread(target=camera_loop, daemon=True).start()
 
-# ---------------------------
-# ----- MAIN / SHUTDOWN -----
-# ---------------------------
-def graceful_shutdown():
-    print("Shutting down...")
-    try:
-        if cap:
-            cap.release()
-    except:
-        pass
-    try:
-        if audio_stream:
-            audio_stream.stop()
-            audio_stream.close()
-    except:
-        pass
-    try:
-        fb_queue.put_nowait(None)
-    except:
-        pass
-    try:
-        if GPIO:
-            GPIO.cleanup()
-    except:
-        pass
-    print("Shutdown complete.")
 
-# Run until Ctrl+C
+
+# ======================================================
+# -------------------- MAIN PROGRAM ---------------------
+# ======================================================
+
 try:
-    speak("Prime is ready.")
+    speak("Prime system is online.", priority=5)
     while True:
         time.sleep(1)
+
 except KeyboardInterrupt:
-    graceful_shutdown()
+    print("Shutting down...")
+    stop_tts = True
+    tts_queue.put((5, None))
+
+    if GPIO:
+        GPIO.cleanup()
+
+    if cap:
+        cap.release()
+
+    if audio_stream:
+        audio_stream.stop()
+        audio_stream.close()
+
+    print("Shutdown complete")
     sys.exit(0)
