@@ -53,6 +53,27 @@ CHANNELS = 1
 VOICE_RECORDING = False
 voice_buffer = []
 
+# Cache last known valid GPS coordinates
+last_lat = None
+last_lng = None
+
+# ========================================
+# TTS GLOBALS
+# ========================================
+tts_queue = queue.PriorityQueue()
+stop_tts = False
+
+# YOLO spam reduction
+last_detected_objects = set()
+last_yolo_speak_time = 0
+YOLO_COOLDOWN = 5  # seconds
+
+# Ultrasonic spam reduction
+last_ultra_speak_time = 0
+ULTRA_COOLDOWN = 3   # seconds
+ULTRA_DIFF_THRESHOLD = 8   # cm movement needed to speak again
+last_ultra_distance = None
+
 # Button long-press duration
 LONG_PRESS_DURATION = 1.5   # seconds
 
@@ -173,20 +194,51 @@ except Exception:
     engine = None
     print("pyttsx3 not available; will use espeak via subprocess.")
 
+def tts_worker():
+    global stop_tts
+
+    while not stop_tts:
+        try:
+            priority, text = tts_queue.get(timeout=1)
+
+            if text is None:
+                continue
+
+            if use_pyttsx3 and engine is not None:
+                try:
+                    engine.say(text)
+                    engine.runAndWait()
+                except Exception as e:
+                    print("pyttsx3 failed, switching to espeak:", e)
+                    subprocess.run(["espeak", text], check=False)
+            else:
+                subprocess.run(["espeak", text], check=False)
+
+            tts_queue.task_done()
+
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print("TTS worker error:", e)
+            continue
+
+# Start the TTS worker thread
+tts_thread = threading.Thread(target=tts_worker, daemon=True)
+tts_thread.start()
+
 # Short TTS wrapper
 def speak(text, priority=5):
-    """Non-blocking-ish TTS (queues are omitted for simplicity)."""
     try:
-        if use_pyttsx3 and engine is not None:
-            try:
-                engine.say(text)
-                engine.runAndWait()
-            except Exception:
-                subprocess.run(["espeak", text], check=False)
-        else:
-            subprocess.run(["espeak", text], check=False)
+        # Preempt lower-priority messages
+        if not tts_queue.empty():
+            current_priority = tts_queue.queue[0][0]
+            if priority < current_priority:
+                with tts_queue.mutex:
+                    tts_queue.queue.clear()
+
+        tts_queue.put((priority, text))
     except Exception as e:
-        print("TTS error:", e)
+        print("Failed to queue TTS:", e)
 
 # ---------------------------
 # ----- FIREBASE QUEUE ------
@@ -308,7 +360,10 @@ def get_nearest_address(lat, lng):
 def gps_push_loop():
     while True:
         lat, lng = get_gps_coordinates(timeout=10)
+        global last_lat, last_lng
         if lat is not None:
+            last_lat = lat
+            last_lng = lng
             push_live_location(lat, lng)
         time.sleep(GPS_PUSH_INTERVAL)
 
@@ -344,14 +399,36 @@ def read_ultrasonic_distance():
 
 # Ultrasonic background worker (push to firebase)
 def ultrasonic_worker():
+    global last_ultra_speak_time, last_ultra_distance
+
     while True:
         d = read_ultrasonic_distance()
+
         if d is not None:
             payload = {"distance_cm": d, "timestamp": time.time()}
             upload_firebase("ultrasonic", payload)
-            # possible warnings:
+
             if d < 80:
-                speak(f"Warning {int(d)} centimeters ahead.")
+
+                now = time.time()
+
+                # Speak if:
+                # 1. First warning OR
+                # 2. Cooldown passed OR
+                # 3. Distance changed significantly
+                if (
+                    last_ultra_distance is None or
+                    (now - last_ultra_speak_time) > ULTRA_COOLDOWN or
+                    abs(d - last_ultra_distance) > ULTRA_DIFF_THRESHOLD
+                ):
+                    speak(f"Warning {int(d)} centimeters ahead.", priority=2)
+                    last_ultra_speak_time = now
+
+                last_ultra_distance = d
+
+            else:
+                last_ultra_distance = None  # Reset when obstacle is gone
+
         time.sleep(0.5)
 
 ultra_thread = threading.Thread(target=ultrasonic_worker, daemon=True)
@@ -361,20 +438,37 @@ ultra_thread.start()
 # ----- VOICE BUTTONS ------
 # ---------------------------
 def handle_get_location():
+    global last_lat, last_lng
+
+    # Try to get live GPS fix
     lat, lng = get_gps_coordinates(timeout=10)
+
+    # If live fix fails → use cached location
     if lat is None:
-        speak("No GPS fix.")
-        return
+        if last_lat is not None and last_lng is not None:
+            lat, lng = last_lat, last_lng
+            speak("Using last known location.")
+        else:
+            speak("No GPS fix and no previous location available.")
+            return
+
+    # Update cache (optional but safe)
+    last_lat, last_lng = lat, lng
+
+    # Speak raw coordinates (rounded)
     s_lat = round(lat, 3)
     s_lng = round(lng, 3)
     speak(f"Your coordinates are latitude {s_lat} and longitude {s_lng}.")
+
+    # Reverse geocode or Places fallback
     name, dist, source = get_nearest_address(lat, lng)
+
     if name is None:
         speak("I cannot find any nearby street or building.")
     else:
         meters = round(dist)
         if source == "reverse":
-            speak(f"You are at or near {name}. Approximately {meters} meters from your GPS point.")
+            speak(f"You are at or near {name}. Approximately {meters} meters away.")
         else:
             speak(f"The nearest known place is {name}, about {meters} meters away.")
 
@@ -400,7 +494,7 @@ def process_recording_and_set_target():
         return
     rec = KaldiRecognizer(vosk_model, SAMPLE_RATE)
     while True:
-        chunk = mem.read(4000)
+        chunk = mem.read(4096)
         if not chunk:
             break
         rec.AcceptWaveform(chunk)
@@ -524,14 +618,28 @@ def sos_button_watcher():
             time.sleep(0.12)
             if (GPIO.input(BTN_SOS_PIN) if GPIO else 1) == 0:
                 speak("SOS activated. Sending emergency alert now.")
+                
+                global last_lat, last_lng
                 lat, lng = get_gps_coordinates(timeout=10)
+                
+                # GPS fail? → Use cached GPS
                 if lat is None:
-                    speak("No GPS fix. SOS not sent.")
-                else:
-                    push_sos(lat, lng)
-                    s_lat = round(lat, 3)
-                    s_lng = round(lng, 3)
-                    speak(f"SOS sent. Coordinates {s_lat}, {s_lng}")
+                    if last_lat is not None and last_lng is not None:
+                        lat, lng = last_lat, last_lng
+                        speak("Using last known GPS fix for SOS.")
+                    else:
+                        speak("No GPS fix. SOS not sent.")
+                        # exit SOS handler
+                        last_state = cur
+                        time.sleep(0.02)
+                        continue
+                
+                # Now we have valid coordinates (fresh or cached)
+                push_sos(lat, lng)
+                s_lat = round(lat, 3)
+                s_lng = round(lng, 3)
+                speak(f"SOS sent. Coordinates {s_lat}, {s_lng}")
+
         last_state = cur
         time.sleep(0.02)
 
@@ -618,10 +726,12 @@ def camera_loop():
         if cap is None or not cap.isOpened():
             time.sleep(1)
             continue
+
         ret, frame = cap.read()
         if not ret:
             time.sleep(0.01)
             continue
+
         # send frame for MJPEG streaming
         mjpeg.set(frame)
 
@@ -631,21 +741,39 @@ def camera_loop():
             last_detection = now
             try:
                 results = yolo.predict(frame, imgsz=640, conf=0.35, max_det=10)
+                global last_detected_objects, last_yolo_speak_time
+
                 objects = []
                 for res in results:
                     for box in res.boxes:
                         cls = int(box.cls[0])
                         label = res.names.get(cls, str(cls))
                         objects.append(label)
-                # upload objects to firebase
-                payload = {"objects_detected": objects, "timestamp": time.time()}
-                upload_firebase("objects", payload)
-                # if close obstacles, speak warnings (example)
-                if objects:
-                    # speak the most frequent or first few
-                    speak(f"Detected {', '.join(objects[:3])}")
+
+                # Upload to firebase unchanged
+                upload_firebase("objects", {
+                    "objects_detected": objects,
+                    "timestamp": time.time()
+                })
+
+                # Convert to sets for comparison
+                current_set = set(objects)
+                now = time.time()
+
+                # --- Speak only if:
+                # 1) New Objects appear
+                # 2) 5 seconds passed since last speak
+                if current_set and (
+                    current_set != last_detected_objects or
+                    (now - last_yolo_speak_time) > YOLO_COOLDOWN
+                ):
+                    speak("Detected " + ", ".join(list(current_set)[:3]), priority=5)
+                    last_detected_objects = current_set
+                    last_yolo_speak_time = now
+
             except Exception as e:
                 print("YOLO predict error:", e)
+
         time.sleep(0.02)
 
 cam_thread = threading.Thread(target=camera_loop, daemon=True)
