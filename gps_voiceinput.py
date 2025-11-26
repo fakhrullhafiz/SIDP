@@ -34,7 +34,7 @@ firebase_admin.initialize_app(cred, {
 # ============================
 def speak(text):
     print(f"[Prime]: {text}")
-    engine = pyttsx3.init(deviceName='espeak')
+    engine = pyttsx3.init()  # Remove deviceName parameter
     engine.setProperty('rate', 160)
     engine.say(text)
     engine.runAndWait()
@@ -228,51 +228,78 @@ def handle_command(cmd):
 # ========================= GPIO SETUP ========================
 # ============================================================
 GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)  # Suppress warnings
 
-BTN_LISTEN = 22   # Button to trigger listening ONCE
-BTN_SOS = 27      # Immediate SOS
+# Define pin numbers FIRST
+BTN_LISTEN = 24
+BTN_SOS = 23
 
+# Clean up any existing configuration on these specific pins
+try:
+    GPIO.cleanup([BTN_LISTEN, BTN_SOS])
+except:
+    pass
+
+# Setup pins
 GPIO.setup(BTN_LISTEN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(BTN_SOS, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
+# Add small delay to ensure pins are ready
+time.sleep(0.1)
+
 # ============================
-# GPIO CALLBACKS
+# GPIO CALLBACKS (Using Polling)
 # ============================
-def button_listen_callback(channel):
-    print("[BUTTON] Press detected, checking for long press...")
-
-    press_time = time.time()
-
-    # Wait until button is released
-    while GPIO.input(BTN_LISTEN) == GPIO.LOW:
-        time.sleep(0.01)
-
-    hold_time = time.time() - press_time
-
-    if hold_time >= 1.5:
-        # LONG PRESS → CANCEL
-        print("[BUTTON] Long press detected → CANCEL")
-        speak("Listening cancelled.")
-        return
-
-    # SHORT PRESS → LISTEN
-    print("[BUTTON] Short press detected → START LISTENING")
-    cmd = listen_for_command()
-    handle_command(cmd)
-
-def button_sos_callback(channel):
-    print("[BUTTON] SOS button pressed")
-    send_sos()
-
-GPIO.add_event_detect(BTN_LISTEN, GPIO.FALLING, callback=button_listen_callback, bouncetime=400)
-GPIO.add_event_detect(BTN_SOS, GPIO.FALLING, callback=button_sos_callback, bouncetime=400)
+def check_buttons():
+    last_listen_state = GPIO.HIGH
+    last_sos_state = GPIO.HIGH
+    
+    while True:
+        # Check LISTEN button
+        current_listen = GPIO.input(BTN_LISTEN)
+        if current_listen == GPIO.LOW and last_listen_state == GPIO.HIGH:
+            # Button pressed
+            print("[BUTTON] Press detected, checking for long press...")
+            press_time = time.time()
+            
+            while GPIO.input(BTN_LISTEN) == GPIO.LOW:
+                time.sleep(0.01)
+            
+            hold_time = time.time() - press_time
+            
+            if hold_time >= 1.5:
+                print("[BUTTON] Long press detected → CANCEL")
+                speak("Listening cancelled.")
+            else:
+                print("[BUTTON] Short press detected → START LISTENING")
+                cmd = listen_for_command()
+                handle_command(cmd)
+            
+            time.sleep(0.3)  # Debounce
+        
+        last_listen_state = current_listen
+        
+        # Check SOS button
+        current_sos = GPIO.input(BTN_SOS)
+        if current_sos == GPIO.LOW and last_sos_state == GPIO.HIGH:
+            print("[BUTTON] SOS button pressed")
+            send_sos()
+            time.sleep(0.3)  # Debounce
+        
+        last_sos_state = current_sos
+        
+        time.sleep(0.05)  # Poll every 50ms
 
 # ============================
 # MAIN PROGRAM START
 # ============================
 speak("Hi, I am Prime. System is ready.")
 
+# Start live tracking
 threading.Thread(target=live_tracking_loop, daemon=True).start()
+
+# Start button checking
+threading.Thread(target=check_buttons, daemon=True).start()
 
 try:
     while True:
