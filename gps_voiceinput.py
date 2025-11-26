@@ -44,7 +44,7 @@ def speak(text):
 recognizer = sr.Recognizer()
 
 # FORCE using webcam mic (C920)
-mic = sr.Microphone(, sample_rate=16000)
+mic = sr.Microphone(sample_rate=16000)
 
 print("Using microphone: HD Pro Webcam C920 (device index 3)")
 
