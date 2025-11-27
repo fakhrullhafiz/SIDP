@@ -13,14 +13,9 @@ from zoneinfo import ZoneInfo
 import datetime
 
 # ============================
-# TIMEZONE SETUP (MALAYSIA)
-# ============================
-malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
-
-# ============================
 # GOOGLE API KEY
 # ============================
-API_KEY = "AIzaSyC3wbCxpdu5gBjjixsDlIR1N-hFSgR2xp4"
+API_KEY = "YOUR_API_KEY"
 
 # ============================
 # GPS SERIAL PORT
@@ -29,7 +24,7 @@ port = "/dev/serial0"
 ser = serial.Serial(port, baudrate=9600, timeout=1)
 
 # ============================
-# FIREBASE INITIALIZATION
+# FIREBASE INIT
 # ============================
 cred = credentials.Certificate("/home/coe/firebase/firebase-key.json")
 firebase_admin.initialize_app(cred, {
@@ -37,26 +32,29 @@ firebase_admin.initialize_app(cred, {
 })
 
 # ============================
-# TTS ENGINE
-# ============================
-def speak(text):
-    print(f"[Prime]: {text}")
-    engine = pyttsx3.init()  # Remove deviceName parameter
-    engine.setProperty('rate', 160)
-    engine.say(text)
-    engine.runAndWait()
-    engine.stop()
-
-# ============================
-# SPEECH RECOGNITION SETUP
+# SPEECH RECOGNITION (NON-BLOCKING)
 # ============================
 recognizer = sr.Recognizer()
 mic = sr.Microphone(sample_rate=16000)
 
+is_listening = False
+stop_listening_fn = None
+
 print("Using microphone: HD Pro Webcam C920")
 
 # ============================
-# GPS READ FUNCTION
+# TTS ENGINE
+# ============================
+def speak(text):
+    print(f"[Prime]: {text}")
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 160)
+    engine.say(text)
+    engine.runAndWait()
+    engine.stop()
+    
+# ============================
+# GPS FUNCTIONS
 # ============================
 def get_gps_coordinates(timeout=10):
     start = time.time()
@@ -74,9 +72,6 @@ def get_gps_coordinates(timeout=10):
         except:
             continue
 
-# ============================
-# FIREBASE PUSH
-# ============================
 def push_live_location(lat, lng):
     ref = db.reference("gpsDB")
     ref.set({
@@ -104,7 +99,7 @@ def push_sos(lat, lng):
     })
 
 # ============================
-# LOCATION RESOLUTION FUNCTIONS
+# MAP LOOKUP FUNCTIONS
 # ============================
 def reverse_geocode(lat, lng):
     try:
@@ -114,10 +109,12 @@ def reverse_geocode(lat, lng):
         if r["status"] != "OK":
             return None, None, None
 
+        # Prefer exact street address
         for result in r["results"]:
             if "street_address" in result["types"]:
                 return result["formatted_address"], lat, lng, "reverse"
 
+        # Route is second best
         for result in r["results"]:
             if "route" in result["types"]:
                 loc = result["geometry"]["location"]
@@ -168,7 +165,7 @@ def get_nearest_address(lat, lng):
     return None, None, None
 
 # ============================
-# SOS FEATURE
+# SOS
 # ============================
 def send_sos():
     speak("SOS detected. Sending emergency alert now.")
@@ -192,24 +189,6 @@ def live_tracking_loop():
         time.sleep(5)
 
 # ============================
-# LISTEN FOR COMMAND (ONLY ON BUTTON PRESS)
-# ============================
-def listen_for_command():
-    try:
-        with mic as source:
-            recognizer.adjust_for_ambient_noise(source, duration=1)
-            speak("I'm listening.")
-            audio = recognizer.listen(source, timeout=5, phrase_time_limit=6)
-
-        cmd = recognizer.recognize_google(audio)
-        print(f"[Heard]: {cmd}")
-        return cmd.lower()
-
-    except:
-        speak("I couldn't understand that.")
-        return None
-
-# ============================
 # COMMAND HANDLER
 # ============================
 def handle_command(cmd):
@@ -228,11 +207,13 @@ def handle_command(cmd):
         speak(f"Your coordinates are latitude {lat_s} and longitude {lng_s}.")
 
         name, dist, src = get_nearest_address(lat, lng)
+
         if not name:
             speak("I cannot find any nearby street or building.")
             return
 
         meters = round(dist)
+
         if src == "reverse":
             speak(f"You are at or near {name}. Approximately {meters} meters away.")
         else:
@@ -241,86 +222,131 @@ def handle_command(cmd):
     elif "sos" in cmd or "help" in cmd:
         send_sos()
 
-# ============================================================
-# ========================= GPIO SETUP ========================
-# ============================================================
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)  # Suppress warnings
+# ============================
+# BACKGROUND STT CALLBACK
+# ============================
+def stt_callback(recognizer_obj, audio):
+    global is_listening, stop_listening_fn
 
-# Define pin numbers FIRST
+    if not is_listening:
+        return  # cancelled mid-listen
+
+    try:
+        cmd = recognizer_obj.recognize_google(audio)
+        print(f"[Heard]: {cmd}")
+        is_listening = False
+        stop_listening_fn(wait_for_stop=False)
+        handle_command(cmd.lower())
+
+    except:
+        speak("I couldn't understand that.")
+        is_listening = False
+        stop_listening_fn(wait_for_stop=False)
+
+# ============================
+# START LISTENING
+# ============================
+def start_listening():
+    global is_listening, stop_listening_fn
+
+    if is_listening:
+        speak("Already listening.")
+        return
+
+    is_listening = True
+    speak("I'm listening.")
+
+    with mic as source:
+        recognizer.adjust_for_ambient_noise(source, duration=0.8)
+
+    stop_listening_fn = recognizer.listen_in_background(mic, stt_callback)
+
+# ============================
+# CANCEL LISTENING
+# ============================
+def cancel_listening():
+    global is_listening, stop_listening_fn
+
+    if not is_listening:
+        speak("Not listening.")
+        return
+
+    is_listening = False
+    if stop_listening_fn:
+        stop_listening_fn(wait_for_stop=False)
+
+    speak("Listening cancelled.")
+
+# ============================
+# GPIO SETUP
+# ============================
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+
 BTN_LISTEN = 24
 BTN_SOS = 23
 
-# Clean up any existing configuration on these specific pins
 try:
     GPIO.cleanup([BTN_LISTEN, BTN_SOS])
 except:
     pass
 
-# Setup pins
 GPIO.setup(BTN_LISTEN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(BTN_SOS, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-# Add small delay to ensure pins are ready
 time.sleep(0.1)
 
 # ============================
-# GPIO CALLBACKS
+# BUTTON POLLING THREAD
 # ============================
 def check_buttons():
     last_listen_state = GPIO.HIGH
     last_sos_state = GPIO.HIGH
-    
+
     while True:
-        # Check LISTEN button
+
+        # LISTEN BUTTON
         current_listen = GPIO.input(BTN_LISTEN)
         if current_listen == GPIO.LOW and last_listen_state == GPIO.HIGH:
-            # Button pressed
-            print("[BUTTON] Press detected, checking for long press...")
             press_time = time.time()
-            
+
             while GPIO.input(BTN_LISTEN) == GPIO.LOW:
                 time.sleep(0.01)
-            
+
             hold_time = time.time() - press_time
-            
+
             if hold_time >= 1.5:
                 print("[BUTTON] Long press detected → CANCEL")
-                speak("Listening cancelled.")
+                cancel_listening()
             else:
                 print("[BUTTON] Short press detected → START LISTENING")
-                cmd = listen_for_command()
-                handle_command(cmd)
-            
-            time.sleep(0.3)  # Debounce
-        
+                start_listening()
+
+            time.sleep(0.3)  # debounce
+
         last_listen_state = current_listen
-        
-        # Check SOS button
+
+        # SOS BUTTON
         current_sos = GPIO.input(BTN_SOS)
         if current_sos == GPIO.LOW and last_sos_state == GPIO.HIGH:
             print("[BUTTON] SOS button pressed")
             send_sos()
-            time.sleep(0.3)  # Debounce
-        
+            time.sleep(0.3)
+
         last_sos_state = current_sos
-        
-        time.sleep(0.05)  # Poll every 50ms
+        time.sleep(0.05)
 
 # ============================
 # MAIN PROGRAM START
 # ============================
 speak("Hi, I am Prime. System is ready.")
 
-# Start live tracking
 threading.Thread(target=live_tracking_loop, daemon=True).start()
-
-# Start button checking
-threading.Thread(target=check_buttons, daemon=True).start()
+threading.Thread(target=check_buttons(), daemon=True).start()
 
 try:
     while True:
-        time.sleep(0.1)  # idle loop
+        time.sleep(0.1)
 except KeyboardInterrupt:
     speak("Shutting down. Goodbye.")
     GPIO.cleanup()
