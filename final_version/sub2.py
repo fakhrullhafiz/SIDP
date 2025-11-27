@@ -472,7 +472,8 @@ def handle_command(cmd):
             if lat is None or lng is None:
                 speak("I do not have a GPS fix right now.")
                 return
-            speak(f"Current coordinates: latitude {round(lat,5)}, longitude {round(lng,5)}.")
+            # Do not announce raw coordinates via TTS; keep a terminal print for debugging
+            print(f"Current coordinates: latitude {round(lat,5)}, longitude {round(lng,5)}.")
             try:
                 friendly = friendly_location(lat, lng)
                 if friendly:
