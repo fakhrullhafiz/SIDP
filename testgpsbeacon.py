@@ -93,6 +93,10 @@ BEACON_LOCATIONS = {
     (1, 1): "Demo End",
 }
 
+# Output rate limiting (seconds)
+UPDATE_INTERVAL = 3.0       # Seconds between updates for same beacon
+SUMMARY_INTERVAL = 10.0     # Seconds between summary prints
+
 # SOS strict phrases
 STRICT_SOS_PHRASES = [
     "sos", "help me", "send help", "send sos", "i need help",
@@ -423,7 +427,8 @@ def btn_poll_thread():
 def parse_ibeacon(manufacturer_data_bytes):
     """Return (uuid, major, minor, tx) or None."""
     try:
-        if len(manufacturer_data_bytes) < 25:
+        # iBeacon payload is 23 bytes (0x02,0x15 + 16-byte UUID + 2-byte major + 2-byte minor + 1-byte tx)
+        if not manufacturer_data_bytes or len(manufacturer_data_bytes) < 23:
             return None
         if manufacturer_data_bytes[0] != 0x02 or manufacturer_data_bytes[1] != 0x15:
             return None
@@ -438,13 +443,16 @@ def parse_ibeacon(manufacturer_data_bytes):
         major = int.from_bytes(manufacturer_data_bytes[18:20], "big")
         minor = int.from_bytes(manufacturer_data_bytes[20:22], "big")
         tx = int.from_bytes(manufacturer_data_bytes[22:23], "big", signed=True)
-        return uuid, major, minor, tx
+        return uuid.lower(), major, minor, tx
     except Exception:
         return None
 
 def rssi_to_distance(rssi, tx_power=TX_POWER_DEFAULT, n=ENV_FACTOR):
     try:
-        return 10 ** ((tx_power - rssi) / (10 * n))
+        if rssi is None:
+            return None
+        distance = 10 ** ((tx_power - rssi) / (10 * n))
+        return round(distance, 2)
     except Exception:
         return None
 
@@ -546,6 +554,11 @@ def beacon_event_processor():
     # We'll print scanning status periodically if no beacon seen
     last_scan_print = 0
     SCAN_PRINT_INTERVAL = 5.0
+    # Rate limiting / summary state (per-beacon)
+    last_print_time = {}
+    last_status = {}
+    detected_beacons = {}
+    last_summary_time = time.time()
 
     while not beacon_stop_event.is_set():
         # if no events, periodically show scanning
@@ -591,13 +604,61 @@ def beacon_event_processor():
                         device_state["last_distance"] = distance
                         device_state["last_rssi"] = rssi
 
-                # Terminal: show distance and rssi every time we get an event
-                # Format distance nicely
-                if distance is None:
-                    dist_text = "unknown"
-                else:
-                    dist_text = f"{round(distance, 2)} m"
-                print(f"[DIST] {dist_text} (RSSI {round(rssi,2) if rssi is not None else 'N/A'})")
+                # Update detected_beacons for summary and for closest-beacon logic
+                detected_beacons[key] = {
+                    'label': label,
+                    'distance': distance,
+                    'avg_rssi': rssi,
+                    'timestamp': ts,
+                }
+
+                # Rate-limited printing logic (per-beacon)
+                current_time = time.time()
+                should_print = False
+                reason = ""
+                if key not in last_print_time:
+                    should_print = True
+                    reason = "NEW BEACON"
+                elif key in last_status and last_status[key] != classify_distance(distance):
+                    should_print = True
+                    reason = f"STATUS CHANGE: {last_status[key]} -> {classify_distance(distance)}"
+                elif current_time - last_print_time.get(key, 0) >= UPDATE_INTERVAL:
+                    should_print = True
+                    reason = "PERIODIC UPDATE"
+
+                # If it's time to print, format and show
+                if should_print:
+                    dist_text = "unknown" if distance is None else f"{round(distance,2)} m"
+                    print(f"[{time.strftime('%H:%M:%S')}] 📍 {label} ({reason})\n"
+                          f"  └─ Beacon: Major {major}, Minor {minor}\n"
+                          f"  └─ RSSI (avg): {round(rssi,1) if rssi is not None else 'N/A'} dBm\n"
+                          f"  └─ Distance: {dist_text}\n")
+                    last_print_time[key] = current_time
+
+                # Update last_status for this beacon
+                last_status[key] = classify_distance(distance)
+                # Periodic summary print
+                if time.time() - last_summary_time >= SUMMARY_INTERVAL:
+                    print('\n' + '=' * 70)
+                    print(f"BEACON SUMMARY [{time.strftime('%H:%M:%S')}]")
+                    print('=' * 70)
+                    if not detected_beacons:
+                        print("No beacons detected")
+                    else:
+                        # find closest
+                        closest = None
+                        for k, v in detected_beacons.items():
+                            if v['distance'] is None:
+                                continue
+                            if closest is None or (v['distance'] < detected_beacons[closest]['distance']):
+                                closest = k
+                        for k, v in sorted(detected_beacons.items()):
+                            marker = '⭐' if k == closest else ' '
+                            name = v.get('label', f"{k[0]}.{k[1]}")
+                            d = v['distance'] if v['distance'] is not None else 'N/A'
+                            print(f"{marker} {name:<20} | {d:>6} m | RSSI: {v['avg_rssi']:>5} dBm")
+                    print('=' * 70 + '\n')
+                    last_summary_time = time.time()
 
                 # Decide whether to speak based on state transitions and cooldowns
                 with device_state_lock:
