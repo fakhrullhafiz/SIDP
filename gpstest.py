@@ -56,6 +56,19 @@ mic = sr.Microphone(sample_rate=16000)
 print("Using microphone: HD Pro Webcam C920")
 
 # ============================
+# STRICT SOS PHRASES
+# ============================
+STRICT_SOS_PHRASES = [
+    "sos",
+    "help me",
+    "send help",
+    "send sos",
+    "i need help",
+    "emergency",
+    "please help me"
+]
+
+# ============================
 # GPS READ FUNCTION
 # ============================
 def get_gps_coordinates(timeout=10):
@@ -171,15 +184,6 @@ def get_nearest_address(lat, lng):
 # SOS FEATURE
 # ============================
 def send_sos():
-    STRICT_SOS_PHRASES = [
-    "sos",
-    "help me",
-    "send help",
-    "send sos",
-    "i need help",
-    "emergency",
-    "please help me"
-]
     speak("SOS detected. Sending emergency alert now.")
     lat, lng = get_gps_coordinates(timeout=10)
 
