@@ -103,11 +103,13 @@ def upload_firebase(upload_type, data):
         pass
 
 # ========================================
-# TEXT-TO-SPEECH (TTS) SETUP
+# SMART TTS MANAGER
+# - Centralized request() API with per-source cooldowns
+# - Suppresses low-priority TTS while user is interacting/listening
+# - Dedupes and rate-limits repeated messages
 # ========================================
-tts_queue = queue.PriorityQueue()
-use_pyttsx3 = False
 
+use_pyttsx3 = False
 try:
     import pyttsx3
     engine = pyttsx3.init()
@@ -119,32 +121,114 @@ except:
     engine = None
     print("Using espeak")
 
-def tts_worker():
-    while not stop_event.is_set():
+
+class TTSManager:
+    def __init__(self, use_pyttsx3, engine):
+        self.use_pyttsx3 = use_pyttsx3
+        self.engine = engine
+        self.q = queue.PriorityQueue()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self.lock = threading.Lock()
+        self.last_announced = {}  # key -> timestamp
+        self.listening = False
+        self.seq = 0
+        # cooldowns (seconds) per source or message key prefix
+        self.default_cooldown = 6.0
+        self.source_cooldowns = {
+            "ultrasonic_Stop": 8.0,
+            "ultrasonic_Warning": 6.0,
+            "ultrasonic_Caution": 5.0,
+            "detection": 8.0,
+            "beacon": 6.0,
+        }
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        # push sentinel
         try:
-            priority, text = tts_queue.get(timeout=1)
-            if text is None:
-                tts_queue.task_done()
-                break
-            if use_pyttsx3 and engine is not None:
-                engine.say(text)
-                engine.runAndWait()
+            self.q.put((9999, 0, None, None, None))
+        except Exception:
+            pass
+        self._thread.join(timeout=1.0)
+
+    def set_listening(self, val: bool):
+        with self.lock:
+            self.listening = bool(val)
+
+    def _effective_cooldown(self, key, source, message):
+        # priority to specific key, then source prefix
+        if key and key in self.source_cooldowns:
+            return self.source_cooldowns[key]
+        if source and f"{source}_{message}" in self.source_cooldowns:
+            return self.source_cooldowns[f"{source}_{message}"]
+        if source and source in self.source_cooldowns:
+            return self.source_cooldowns[source]
+        return self.default_cooldown
+
+    def request(self, text, priority=5, source="generic", dedupe_key=None, min_interval=None):
+        # If user is actively listening or initiating voice commands, suppress low-priority TTS
+        with self.lock:
+            if self.listening and (priority is None or priority >= 4):
+                return False
+
+        key = dedupe_key or text
+        now = time.time()
+        cooldown = min_interval if min_interval is not None else self._effective_cooldown(key, source, text)
+        last = self.last_announced.get(key)
+        if last is not None and (now - last) < cooldown:
+            return False
+
+        # enqueue with an increasing seq to preserve FIFO for same priority
+        with self.lock:
+            self.seq += 1
+            seq = self.seq
+        self.q.put((priority, seq, text, source, key))
+        return True
+
+    def _speak_text(self, text):
+        try:
+            if self.use_pyttsx3 and self.engine is not None:
+                self.engine.say(text)
+                self.engine.runAndWait()
             else:
                 subprocess.run(["espeak", text], check=False)
-            tts_queue.task_done()
-        except queue.Empty:
-            continue
-        except:
+        except Exception:
+            pass
+
+    def _worker(self):
+        # simple worker; ensures dedupe/time-based cooldown enforcement
+        while not self._stop.is_set():
             try:
-                tts_queue.task_done()
-            except:
+                priority, seq, text, source, key = self.q.get(timeout=0.7)
+            except queue.Empty:
+                continue
+            if text is None:
+                break
+
+            # re-check listening state before speaking
+            with self.lock:
+                if self.listening and (priority is None or priority >= 4):
+                    # drop low priority while listening
+                    continue
+
+            # speak and update last_announced for dedupe key
+            self._speak_text(text)
+            try:
+                self.last_announced[key] = time.time()
+            except Exception:
                 pass
 
-tts_thread = threading.Thread(target=tts_worker, daemon=True)
-tts_thread.start()
 
-def speak(text, priority=5):
-    tts_queue.put((priority, text))
+# instantiate and start manager
+tts_manager = TTSManager(use_pyttsx3, engine)
+tts_manager.start()
+
+def speak(text, priority=5, source="generic", dedupe_key=None, min_interval=None):
+    return tts_manager.request(text, priority=priority, source=source, dedupe_key=dedupe_key, min_interval=min_interval)
 
 # ========================================
 # ULTRASONIC SENSOR SETUP
@@ -223,7 +307,8 @@ def ultrasonic_worker():
             })
 
         if message != "Clear" and (message != last_message or (current_time - last_announce) > 2.0):
-            speak(message, priority)
+            # request TTS via manager; dedupe by ultrasonic_<message> so cooldowns apply per-message
+            speak(message, priority, source="ultrasonic", dedupe_key=f"ultrasonic_{message}")
             last_message = message
             last_announce = current_time
         elif message == "Clear":
@@ -443,7 +528,9 @@ try:
                                         announced.add(name)
                                         last_announced[name] = now
                             if announced:
-                                speak(", ".join(announced) + " detected", 5)
+                                # combine announced objects into a single announcement and use a dedupe key
+                                text = ", ".join(sorted(announced)) + " detected"
+                                speak(text, 5, source="detection", dedupe_key=f"detection_{'_'.join(sorted(announced))}")
 
                             fb_objs = [{
                                 "name": names[i],
@@ -547,7 +634,9 @@ finally:
 
     try: firebase_queue.put((None, None)); firebase_thread.join(timeout=1)
     except: pass
-    try: tts_queue.put((0, None)); tts_thread.join(timeout=1)
+    try:
+        # stop the smarter TTS manager
+        tts_manager.stop()
     except: pass
     if use_pyttsx3:
         try: engine.stop()

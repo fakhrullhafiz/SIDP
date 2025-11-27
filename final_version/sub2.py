@@ -122,6 +122,89 @@ tts_engine = pyttsx3.init()
 tts_engine.setProperty("rate", TTS_RATE)
 tts_lock = threading.Lock()
 
+
+# Smart TTS manager similar to sub1: centralizes requests, cooldowns, suppression while listening
+class TTSManager:
+    def __init__(self, engine):
+        self.engine = engine
+        self.q = queue.PriorityQueue()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self.lock = threading.Lock()
+        self.last_announced = {}
+        self.listening = False
+        self.seq = 0
+        self.default_cooldown = 6.0
+        self.source_cooldowns = {
+            "beacon": 6.0,
+            "gps_sos": 1.0,
+            "listen": 1.0,
+        }
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        try:
+            self.q.put((9999, 0, None, None, None))
+        except Exception:
+            pass
+        self._thread.join(timeout=1.0)
+
+    def set_listening(self, v: bool):
+        with self.lock:
+            self.listening = bool(v)
+
+    def request(self, text, priority=5, source="generic", dedupe_key=None, min_interval=None):
+        with self.lock:
+            if self.listening and (priority is None or priority >= 4):
+                return False
+        key = dedupe_key or text
+        now = time.time()
+        cooldown = min_interval if min_interval is not None else (self.source_cooldowns.get(source, self.default_cooldown))
+        last = self.last_announced.get(key)
+        if last is not None and (now - last) < cooldown:
+            return False
+        with self.lock:
+            self.seq += 1
+            seq = self.seq
+        self.q.put((priority, seq, text, source, key))
+        return True
+
+    def _speak_text(self, text):
+        try:
+            with tts_lock:
+                print("[TTS]", text)
+                self.engine.say(text)
+                self.engine.runAndWait()
+        except Exception as e:
+            print("TTS speak error:", e)
+
+    def _worker(self):
+        while not self._stop.is_set():
+            try:
+                priority, seq, text, source, key = self.q.get(timeout=0.7)
+            except queue.Empty:
+                continue
+            if text is None:
+                break
+            with self.lock:
+                if self.listening and (priority is None or priority >= 4):
+                    continue
+            self._speak_text(text)
+            try:
+                self.last_announced[key] = time.time()
+            except Exception:
+                pass
+
+
+tts_manager = TTSManager(tts_engine)
+tts_manager.start()
+
+def speak(text, priority=5, source="generic", dedupe_key=None, min_interval=None):
+    return tts_manager.request(text, priority=priority, source=source, dedupe_key=dedupe_key, min_interval=min_interval)
+
 # Firebase flag
 firebase_enabled = False
 
@@ -162,15 +245,6 @@ def now_iso():
     # Return timestamp in the same format as gpstest.py using malaysia_tz
     return datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
 
-def speak(text):
-    """Thread-safe TTS using a single pyttsx3 engine."""
-    with tts_lock:
-        try:
-            print("[TTS]", text)
-            tts_engine.say(text)
-            tts_engine.runAndWait()
-        except Exception as e:
-            print("TTS error:", e)
 
 # -------------------------
 # Firebase init & helpers
@@ -425,17 +499,18 @@ def send_sos():
         lng = latest_gps.get("lng")
         ts = latest_gps.get("timestamp")
     if lat is None or lng is None:
-        speak("GPS fix unavailable. SOS cannot be sent.")
+        speak("GPS fix unavailable. SOS cannot be sent.", priority=1, source="gps_sos")
         return
     push_sos_record(lat, lng, ts, reason="manual_sos")
-    speak(f"S O S sent. Coordinates: {round(lat,5)} latitude, {round(lng,5)} longitude.")
+    speak(f"S O S sent. Coordinates: {round(lat,5)} latitude, {round(lng,5)} longitude.", priority=1, source="gps_sos")
 
 def listen_for_command(timeout=6):
     """Listen using speech_recognition and return recognised lowercase text, or None."""
     try:
         with sr.Microphone() as source:
             recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            speak("Listening.")
+            # announce listening; higher priority so it plays even if manager suppresses low-priority items
+            speak("Listening.", priority=2, source="listen")
             audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=6)
         text = recognizer.recognize_google(audio)
         if text:
@@ -457,11 +532,11 @@ def handle_command(cmd):
     if not cmd:
         return
     # SOS phrases
-    for phrase in STRICT_SOS_PHRASES:
-        if phrase in cmd:
-            speak("SOS voice command detected.")
-            send_sos()
-            return
+        for phrase in STRICT_SOS_PHRASES:
+            if phrase in cmd:
+                speak("SOS voice command detected.", priority=1, source="gps_sos")
+                send_sos()
+                return
     # Location queries
     for kw in LOCATION_KEYWORDS:
         if kw in cmd:
@@ -470,14 +545,14 @@ def handle_command(cmd):
                 lng = latest_gps.get("lng")
                 ts = latest_gps.get("timestamp")
             if lat is None or lng is None:
-                speak("I do not have a GPS fix right now.")
+                speak("I do not have a GPS fix right now.", priority=2, source="gps")
                 return
             # Do not announce raw coordinates via TTS; keep a terminal print for debugging
             print(f"Current coordinates: latitude {round(lat,5)}, longitude {round(lng,5)}.")
             try:
                 friendly = friendly_location(lat, lng)
                 if friendly:
-                    speak(f"My best guess: {friendly}")
+                    speak(f"My best guess: {friendly}", priority=3, source="gps")
                     return
             except Exception as e:
                 print("friendly_location error:", e)
@@ -485,13 +560,13 @@ def handle_command(cmd):
             # Fallback to previous behavior if friendly helper failed
             addr = reverse_geocode(lat, lng)
             if addr:
-                speak(f"My best guess: {addr}")
+                speak(f"My best guess: {addr}", priority=3, source="gps")
                 return
             name, vicinity = get_nearest_place(lat, lng)
             if name:
-                speak(f"Nearest place: {name}. {vicinity or ''}")
+                speak(f"Nearest place: {name}. {vicinity or ''}", priority=3, source="gps")
             else:
-                speak("No nearby place found.")
+                speak("No nearby place found.", priority=4, source="gps")
             return
 
 # -------------------------
@@ -509,8 +584,13 @@ def btn_poll_thread():
                 if GPIO.input(BTN_LISTEN) == GPIO.LOW:
                     print("Listen pressed")
                     try:
-                        cmd = listen_for_command()
-                        handle_command(cmd)
+                        # suppress other low-priority TTS while user is listening
+                        try:
+                            tts_manager.set_listening(True)
+                            cmd = listen_for_command()
+                            handle_command(cmd)
+                        finally:
+                            tts_manager.set_listening(False)
                     except Exception as e:
                         print("Listen handler error:", e)
                     while GPIO.input(BTN_LISTEN) == GPIO.LOW:
@@ -705,8 +785,8 @@ def beacon_event_processor():
                     print("Minor:", minor)
                     print("TX Power:", event.get("tx") if event.get("tx") is not None else TX_POWER_DEFAULT)
                     print("Initial RSSI (avg):", round(rssi, 2) if rssi is not None else "N/A")
-                    # announce once
-                    speak(f"{label} detected. Navigating toward the destination.")
+                    # announce once (use beacon source and dedupe by major/minor)
+                    speak(f"{label} detected. Navigating toward the destination.", priority=3, source="beacon", dedupe_key=f"beacon_{major}_{minor}")
                     with device_state_lock:
                         device_state["first_seen"] = True
                         device_state["last_state"] = "detected"
@@ -838,7 +918,15 @@ def beacon_event_processor():
                     device_state["last_state"] = curr_state
 
                 if do_speak and speak_text:
-                    speak(speak_text)
+                    # map state to priority
+                    state_priority = {
+                        'reached': 1,
+                        'near': 2,
+                        'mid': 3,
+                        'far': 4
+                    }
+                    pr = state_priority.get(curr_state, 4)
+                    speak(speak_text, priority=pr, source='beacon', dedupe_key=f"beacon_{major}_{minor}")
 
                 # Push sighting to firebase (non-blocking)
                 try:
@@ -889,7 +977,7 @@ def main():
     processor_t = threading.Thread(target=beacon_event_processor, daemon=True)
     processor_t.start()
 
-    speak("Prime is ready. Beacon scanner active.")
+    speak("Prime is ready. Beacon scanner active.", priority=4, source="system")
 
     try:
         while True:
@@ -899,7 +987,11 @@ def main():
     finally:
         beacon_stop_event.set()
         time.sleep(0.5)
-        speak("Shutting down.")
+        speak("Shutting down.", priority=4, source="system")
+        try:
+            tts_manager.stop()
+        except Exception:
+            pass
         # Threads are daemon; process will exit
 
 if __name__ == "__main__":
