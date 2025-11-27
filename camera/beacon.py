@@ -11,7 +11,7 @@ from collections import deque
 import time
 import math
 
-# ==============================
+# ===================== =========
 # CONFIG FOR YOUR BEACONS
 # ==============================
 TARGET_UUID = "fda50693-a4e2-4fb1-afcf-c6eb07647825".lower()
