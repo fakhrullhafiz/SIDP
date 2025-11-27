@@ -36,6 +36,7 @@ import pynmea2
 
 # TTS
 import pyttsx3
+import speech_recognition as sr
 
 # Networking / Firebase (optional)
 import requests
@@ -62,6 +63,9 @@ SERIAL_BAUDRATE = 9600
 # Firebase
 FIREBASE_CRED_PATH = os.getenv("FIREBASE_CRED", "/home/coe/firebase/firebase-key.json")
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", None)  # e.g., "https://project-id.firebaseio.com/"
+
+# Optional Google API key for reverse geocoding / places (set via env var)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", None)
 
 # TTS
 TTS_RATE = 160
@@ -171,6 +175,103 @@ def push_beacon_sighting_to_firebase(beacon_event):
         ref.push(beacon_event)
     except Exception as e:
         print("Firebase push_beacon_sighting error:", e)
+
+def push_sos(lat, lng):
+    """
+    Push SOS to Firebase similarly to the original `gpstest.py` implementation.
+    Updates the latest SOS status under `/sosDB/Active` and appends a history entry.
+    """
+    if not firebase_enabled:
+        print("Firebase not enabled; skipping push_sos.")
+        return
+    try:
+        sos_root = db.reference("/sosDB")
+        # Latest SOS
+        sos_root.update({
+            "Active": True,
+            "latitude": lat,
+            "longitude": lng,
+            "timestamp": datetime.now(zone).strftime("%Y/%m/%d %H:%M:%S")
+        })
+
+        # SOS history
+        sos_root.child("history").push({
+            "latitude": lat,
+            "longitude": lng,
+            "timestamp": datetime.now(zone).strftime("%Y/%m/%d %H:%M:%S")
+        })
+    except Exception as e:
+        print("Firebase push_sos error:", e)
+
+def reverse_geocode(lat, lng):
+    """Reverse geocode via Google Geocoding API. Returns (address, lat, lng, "reverse") or (None, None, None).
+    Requires `GOOGLE_API_KEY` environment variable to be set.
+    """
+    if not GOOGLE_API_KEY:
+        return None, None, None
+    try:
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&key={GOOGLE_API_KEY}"
+        r = requests.get(url, timeout=6).json()
+
+        if r.get("status") != "OK":
+            return None, None, None
+
+        for result in r.get("results", []):
+            if "street_address" in result.get("types", []):
+                return result.get("formatted_address"), lat, lng, "reverse"
+
+        for result in r.get("results", []):
+            if "route" in result.get("types", []):
+                loc = result.get("geometry", {}).get("location", {})
+                return result.get("formatted_address"), loc.get("lat"), loc.get("lng"), "reverse"
+
+        return None, None, None
+    except Exception as e:
+        print("reverse_geocode error:", e)
+        return None, None, None
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+
+def get_nearest_place(lat, lng, radius=300):
+    if not GOOGLE_API_KEY:
+        return None, None, None, None
+    try:
+        url = (
+            f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?"
+            f"location={lat},{lng}&radius={radius}&key={GOOGLE_API_KEY}"
+        )
+        r = requests.get(url, timeout=6).json()
+
+        if r.get("status") != "OK" or not r.get("results"):
+            return None, None, None, None
+
+        place = r["results"][0]
+        name = place.get("name")
+        loc = place.get("geometry", {}).get("location", {})
+
+        return name, loc.get("lat"), loc.get("lng"), "places"
+    except Exception as e:
+        print("get_nearest_place error:", e)
+        return None, None, None, None
+
+def get_nearest_address(lat, lng):
+    addr, a_lat, a_lng, src = reverse_geocode(lat, lng)
+    if addr:
+        dist = haversine(lat, lng, a_lat, a_lng)
+        return addr, dist, src
+
+    name, p_lat, p_lng, src = get_nearest_place(lat, lng)
+    if name:
+        dist = haversine(lat, lng, p_lat, p_lng)
+        return name, dist, src
+
+    return None, None, None
 
 # -------------------------
 # GPS reading
@@ -285,15 +386,91 @@ def btn_poll_thread(listen_callback, sos_callback):
 
 # Placeholder listen & sos callbacks (reuse your project's actual implementations)
 def listen_for_command():
-    # Minimal placeholder - implement your existing speech_recognition logic here
-    speak("Listening (placeholder).")
-    # In your real code you'd capture audio and return recognized text or None
-    return None
+    """
+    Listen for a spoken command using Google Speech (via `speech_recognition`).
+    Returns the recognized command string (lowercased) or None on fatal error.
+    Implements strict SOS phrase matching and location-related keywords.
+    """
+    STRICT_SOS_PHRASES = [
+        "sos",
+        "help me",
+        "send help",
+        "send sos",
+        "i need help",
+        "emergency",
+        "please help me",
+    ]
+
+    location_keywords = ["location", "where"]
+
+    try:
+        recognizer = sr.Recognizer()
+        mic = sr.Microphone(sample_rate=16000)
+    except Exception as e:
+        print("Speech recognition/microphone unavailable:", e)
+        speak("Audio input not available.")
+        return None
+
+    while True:
+        try:
+            with mic as source:
+                speak("I'm listening.")
+                recognizer.adjust_for_ambient_noise(source, duration=0.7)
+                audio = recognizer.listen(source, timeout=5, phrase_time_limit=6)
+
+            cmd = recognizer.recognize_google(audio).lower()
+            print(f"[Heard]: {cmd}")
+
+            # Strict SOS exact-match phrases
+            if cmd in STRICT_SOS_PHRASES:
+                return cmd
+
+            # Location queries
+            if any(k in cmd for k in location_keywords):
+                return cmd
+
+            # Otherwise unknown command — prompt again
+            speak("Sorry, I cannot comprehend that command.")
+            continue
+
+        except sr.WaitTimeoutError:
+            continue
+        except sr.UnknownValueError:
+            speak("I didn't catch that. Say it again.")
+            continue
+        except Exception as e:
+            print("Speech recognition error:", e)
+            speak("Speech system error.")
+            return None
 
 def send_sos():
-    # Minimal placeholder - implement your existing SOS sending logic here
-    speak("SOS triggered (placeholder).")
-    # Reuse your existing push_sos(...) if present in your original script.
+    """
+    Trigger an SOS: obtain the latest GPS (wait up to ~10s), push SOS to Firebase (if enabled), and announce.
+    """
+    speak("SOS detected. Sending emergency alert now.")
+
+    # try to use latest_gps (updated by gps_live_thread)
+    start = time.time()
+    lat = None
+    lng = None
+    while time.time() - start < 10:
+        with latest_gps_lock:
+            lat = latest_gps.get("lat")
+            lng = latest_gps.get("lng")
+        if lat is not None and lng is not None:
+            break
+        time.sleep(0.5)
+
+    if lat is None or lng is None:
+        speak("No GPS fix. SOS not sent.")
+        return
+
+    try:
+        push_sos(lat, lng)
+        speak(f"SOS sent. Coordinates {round(lat,3)}, {round(lng,3)}")
+    except Exception as e:
+        print("Error sending SOS:", e)
+        speak("Failed to send SOS.")
 
 # -------------------------
 # Beacon parsing & scanner (iBeacon)
