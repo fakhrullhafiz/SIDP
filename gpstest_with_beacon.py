@@ -170,7 +170,7 @@ def push_live_location(lat, lng, ts_iso):
     if not firebase_enabled:
         return
     try:
-        ref = db.reference("/gpsDB/Live")
+        ref = db.reference("gpsDB")
         ref.set({
             "latitude": lat,
             "longitude": lng,
