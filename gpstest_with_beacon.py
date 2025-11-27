@@ -183,21 +183,22 @@ def push_sos_record(lat, lng, ts_iso, reason=None):
     if not firebase_enabled:
         return
     try:
+        # Use the same `sosDB` node structure as in gpstest.py so the dashboard keys match exactly.
         sos_root = db.reference("sosDB")
-
-        # Latest SOS
+        # Use localised timestamp format matching gpstest.py: YYYY/MM/DD HH:MM:SS
+        ts_local = datetime.now(zone).strftime("%Y/%m/%d %H:%M:%S")
+        # Update top-level sosDB with Active flag and coordinates (exact keys expected by dashboard)
         sos_root.update({
             "Active": True,
             "latitude": lat,
             "longitude": lng,
-            "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
+            "timestamp": ts_local
         })
-
-        # SOS history
+        # Push into history under sosDB/history with same keys (dashboard expects latitude/longitude/timestamp)
         sos_root.child("history").push({
             "latitude": lat,
             "longitude": lng,
-            "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
+            "timestamp": ts_local
         })
     except Exception as e:
         print("push_sos_record error:", e)
