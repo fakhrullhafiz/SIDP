@@ -79,7 +79,7 @@ def push_live_location(lat, lng):
     })
 
 def push_sos(lat, lng):
-    ref = db.reference("sos")
+    ref = db.reference("sosDB")
     ref.set({
         "latitude": lat,
         "longitude": lng,
