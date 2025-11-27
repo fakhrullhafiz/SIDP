@@ -9,13 +9,6 @@ import threading
 import firebase_admin
 from firebase_admin import credentials, db
 import RPi.GPIO as GPIO
-from zoneinfo import ZoneInfo
-import datetime
-
-# ============================
-# TIMEZONE SETUP (MALAYSIA)
-# ============================
-malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
 
 # ============================
 # GOOGLE API KEY
@@ -37,33 +30,6 @@ firebase_admin.initialize_app(cred, {
 })
 
 # ============================
-# SPEECH RECOGNITION SETUP
-# ============================
-recognizer = sr.Recognizer()
-mic = sr.Microphone(sample_rate=16000)
-
-print("Using microphone: HD Pro Webcam C920")
-
-# ============================
-# STRICT SOS PHRASES
-# ============================
-STRICT_SOS_PHRASES = [
-    "sos",
-    "help me",
-    "send help",
-    "send sos",
-    "i need help",
-    "emergency",
-    "please help me"
-]
-
-# ============================
-# Listening mode cancellation
-# ============================
-cancel_listen = False
-is_listening = False
-
-# ============================
 # TTS ENGINE
 # ============================
 def speak(text):
@@ -73,6 +39,14 @@ def speak(text):
     engine.say(text)
     engine.runAndWait()
     engine.stop()
+
+# ============================
+# SPEECH RECOGNITION SETUP
+# ============================
+recognizer = sr.Recognizer()
+mic = sr.Microphone(sample_rate=16000)
+
+print("Using microphone: HD Pro Webcam C920")
 
 # ============================
 # GPS READ FUNCTION
@@ -101,25 +75,15 @@ def push_live_location(lat, lng):
     ref.set({
         "latitude": lat,
         "longitude": lng,
-        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
+        "timestamp": time.time()
     })
 
 def push_sos(lat, lng):
-    sos_root = db.reference("sosDB")
-    
-    # Latest SOS
-    sos_root.update({
-        "Active": True,
+    ref = db.reference("sosDB")
+    ref.set({
         "latitude": lat,
         "longitude": lng,
-        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
-    })
-
-    # SOS history
-    sos_root.child("history").push({
-        "latitude": lat,
-        "longitude": lng,
-        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
+        "timestamp": time.time()
     })
 
 # ============================
@@ -214,64 +178,19 @@ def live_tracking_loop():
 # LISTEN FOR COMMAND (ONLY ON BUTTON PRESS)
 # ============================
 def listen_for_command():
-    global cancel_listen
-    valid_location_keywords = ["location", "where"]
+    try:
+        with mic as source:
+            recognizer.adjust_for_ambient_noise(source, duration=1)
+            speak("I'm listening.")
+            audio = recognizer.listen(source, timeout=5, phrase_time_limit=6)
 
-    while True:
-        # --- CANCEL CHECK ---
-        if cancel_listen:
-            return "cancelled"
+        cmd = recognizer.recognize_google(audio)
+        print(f"[Heard]: {cmd}")
+        return cmd.lower()
 
-        try:
-            with mic as source:
-                speak("I'm listening.")
-                recognizer.adjust_for_ambient_noise(source, duration=0.7)
-
-                # small timeout so cancel is responsive
-                audio = recognizer.listen(source, timeout=2, phrase_time_limit=6)
-
-            cmd = recognizer.recognize_google(audio).lower()
-            print(f"[Heard]: {cmd}")
-
-            # strict SOS
-            if cmd in STRICT_SOS_PHRASES:
-                return cmd
-
-            if any(k in cmd for k in valid_location_keywords):
-                return cmd
-
-            speak("Sorry, I cannot comprehend that command.")
-            continue
-
-        except sr.WaitTimeoutError:
-            continue
-
-        except sr.UnknownValueError:
-            speak("I didn't catch that. Say it again.")
-            continue
-
-        except Exception as e:
-            print(f"[FATAL SR ERROR]: {e}")
-            speak("Speech system error.")
-            return None
-            
-# ============================
-# LISTEN THREAD WRAPPER
-# ============================
-def listen_thread():
-    global is_listening, cancel_listen
-    is_listening = True
-    cancel_listen = False
-
-    cmd = listen_for_command()
-
-    is_listening = False
-
-    if cmd == "cancelled":
-        return   # do NOTHING, simply stop listening mode
-    
-    if cmd is not None:
-        handle_command(cmd)
+    except:
+        speak("I couldn't understand that.")
+        return None
 
 # ============================
 # COMMAND HANDLER
@@ -302,8 +221,7 @@ def handle_command(cmd):
         else:
             speak(f"The nearest known place is {name}, about {meters} meters away.")
 
-    # STRICT SOS CHECK
-    elif cmd in STRICT_SOS_PHRASES:
+    elif "sos" in cmd or "help" in cmd:
         send_sos()
 
 # ============================================================
@@ -330,7 +248,7 @@ GPIO.setup(BTN_SOS, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 time.sleep(0.1)
 
 # ============================
-# GPIO CALLBACKS (Using Polling)
+# GPIO CALLBACKS
 # ============================
 def check_buttons():
     last_listen_state = GPIO.HIGH
@@ -351,11 +269,11 @@ def check_buttons():
             
             if hold_time >= 1.5:
                 print("[BUTTON] Long press detected → CANCEL")
-                cancel_listen = True
                 speak("Listening cancelled.")
             else:
                 print("[BUTTON] Short press detected → START LISTENING")
-                threading.Thread(target=listen_thread, daemon=True).start()
+                cmd = listen_for_command()
+                handle_command(cmd)
             
             time.sleep(0.3)  # Debounce
         
@@ -389,4 +307,3 @@ try:
 except KeyboardInterrupt:
     speak("Shutting down. Goodbye.")
     GPIO.cleanup()
-    exit(0)
