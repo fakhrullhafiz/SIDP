@@ -183,9 +183,10 @@ def push_sos_record(lat, lng, ts_iso, reason=None):
     if not firebase_enabled:
         return
     try:
-        ref_active = db.reference("/sosDB/Active")
+        # ref_active = db.reference("/sosDB/Active")
         history_ref = db.reference("/sosDB/history")
         payload = {
+            "Active": True,
             "latitude": lat,
             "longitude": lng,
             "timestamp": ts_iso,
