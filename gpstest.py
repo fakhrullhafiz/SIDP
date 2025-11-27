@@ -194,19 +194,31 @@ def live_tracking_loop():
 # LISTEN FOR COMMAND (ONLY ON BUTTON PRESS)
 # ============================
 def listen_for_command():
-    try:
-        with mic as source:
-            recognizer.adjust_for_ambient_noise(source, duration=1)
-            speak("I'm listening.")
-            audio = recognizer.listen(source, timeout=5, phrase_time_limit=6)
+    while True:
+        try:
+            with mic as source:
+                speak("I'm listening.")
+                recognizer.adjust_for_ambient_noise(source, duration=0.7)
+                audio = recognizer.listen(source, timeout=5, phrase_time_limit=6)
 
-        cmd = recognizer.recognize_google(audio)
-        print(f"[Heard]: {cmd}")
-        return cmd.lower()
+            cmd = recognizer.recognize_google(audio)
+            print(f"[Heard]: {cmd}")
+            return cmd.lower()
 
-    except:
-        speak("I couldn't understand that.")
-        return None
+        except sr.WaitTimeoutError:
+            # Just retry silently, don't annoy the user
+            continue
+
+        except sr.UnknownValueError:
+            # Speech unclear → retry
+            speak("I didn't catch that. Say it again.")
+            continue
+
+        except Exception as e:
+            # Fatal issue (mic unplugged, recognizer crash, etc.)
+            print(f"[FATAL SR ERROR]: {e}")
+            speak("Speech system error.")
+            return None
 
 # ============================
 # COMMAND HANDLER
