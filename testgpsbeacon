@@ -285,16 +285,50 @@ def gps_thread_fn():
 # Reverse geocode & places (Google)
 # -------------------------
 def reverse_geocode(lat, lng):
-    """Return (formatted_address or None)."""
     try:
         url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&key={API_KEY}"
-        r = requests.get(url, timeout=4)
-        data = r.json()
-        if data.get("status") == "OK" and data.get("results"):
-            return data["results"][0].get("formatted_address")
+        r = requests.get(url).json()
+
+        if r["status"] != "OK":
+            return None, None, None
+
+        # Priority order for address types
+        preferred_types = [
+            "street_address",
+            "premise",
+            "route",
+            "neighborhood",
+            "sublocality",
+            "locality"
+        ]
+
+        # Try to find result matching preferred types
+        for pref_type in preferred_types:
+            for result in r["results"]:
+                # Skip plus_code results
+                if "plus_code" in result.get("types", []):
+                    continue
+                
+                if pref_type in result["types"]:
+                    # Get the formatted address without plus code
+                    addr = result["formatted_address"]
+                    
+                    # Remove plus code if it appears in the address
+                    if "+" in addr:
+                        # Split by comma and filter out plus code parts
+                        parts = [p.strip() for p in addr.split(",")]
+                        parts = [p for p in parts if "+" not in p]
+                        addr = ", ".join(parts)
+                    
+                    loc = result["geometry"]["location"]
+                    return addr, loc["lat"], loc["lng"], "reverse"
+
+        # If no good match found, return None
+        return None, None, None
+        
     except Exception as e:
-        print("reverse_geocode error:", e)
-    return None
+        print(f"[ERROR] Reverse geocoding failed: {e}")
+        return None, None, None
 
 def get_nearest_place(lat, lng):
     """Return (name, vicinity) or (None, None)"""
