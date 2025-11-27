@@ -170,6 +170,15 @@ def get_nearest_address(lat, lng):
 # SOS FEATURE
 # ============================
 def send_sos():
+    STRICT_SOS_PHRASES = [
+    "sos",
+    "help me",
+    "send help",
+    "send sos",
+    "i need help",
+    "emergency",
+    "please help me"
+]
     speak("SOS detected. Sending emergency alert now.")
     lat, lng = get_gps_coordinates(timeout=10)
 
@@ -194,6 +203,8 @@ def live_tracking_loop():
 # LISTEN FOR COMMAND (ONLY ON BUTTON PRESS)
 # ============================
 def listen_for_command():
+    valid_location_keywords = ["location", "where"]
+
     while True:
         try:
             with mic as source:
@@ -201,21 +212,29 @@ def listen_for_command():
                 recognizer.adjust_for_ambient_noise(source, duration=0.7)
                 audio = recognizer.listen(source, timeout=5, phrase_time_limit=6)
 
-            cmd = recognizer.recognize_google(audio)
+            cmd = recognizer.recognize_google(audio).lower()
             print(f"[Heard]: {cmd}")
-            return cmd.lower()
+
+            # ------------- STRICT SOS MATCH -------------
+            if cmd in STRICT_SOS_PHRASES:
+                return cmd  # valid SOS command
+
+            # ------------- LOCATION COMMANDS -------------
+            if any(k in cmd for k in valid_location_keywords):
+                return cmd  # valid location-related
+
+            # ------------- UNKNOWN COMMAND -------------
+            speak("Sorry, I cannot comprehend that command.")
+            continue
 
         except sr.WaitTimeoutError:
-            # Just retry silently, don't annoy the user
             continue
 
         except sr.UnknownValueError:
-            # Speech unclear → retry
             speak("I didn't catch that. Say it again.")
             continue
 
         except Exception as e:
-            # Fatal issue (mic unplugged, recognizer crash, etc.)
             print(f"[FATAL SR ERROR]: {e}")
             speak("Speech system error.")
             return None
@@ -249,7 +268,8 @@ def handle_command(cmd):
         else:
             speak(f"The nearest known place is {name}, about {meters} meters away.")
 
-    elif "sos" in cmd or "help" in cmd:
+    # STRICT SOS CHECK
+    elif cmd in STRICT_SOS_PHRASES:
         send_sos()
 
 # ============================================================
