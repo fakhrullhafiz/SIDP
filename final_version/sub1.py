@@ -1,3 +1,4 @@
+
 import RPi.GPIO as GPIO
 import time
 import datetime
@@ -13,6 +14,16 @@ from firebase_admin import credentials, db
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import sys
 import base64
+import signal
+
+# ========================================
+# SIGNAL HANDLER FOR GRACEFUL TERMINATION
+# ========================================
+def handle_sigterm(signum, frame):
+    print("SIGTERM received, shutting down gracefully...")
+    stop_event.set()
+
+signal.signal(signal.SIGTERM, handle_sigterm)
 
 # ========================================
 # FIREBASE SETUP
