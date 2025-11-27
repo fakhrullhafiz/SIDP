@@ -183,17 +183,22 @@ def push_sos_record(lat, lng, ts_iso, reason=None):
     if not firebase_enabled:
         return
     try:
-        # ref_active = db.reference("/sosDB/Active")
-        history_ref = db.reference("/sosDB/history")
-        payload = {
+        sos_root = db.reference("sosDB")
+
+        # Latest SOS
+        sos_root.update({
             "Active": True,
             "latitude": lat,
             "longitude": lng,
-            "timestamp": ts_iso,
-            "reason": reason or ""
-        }
-        ref_active.set(payload)
-        history_ref.push(payload)
+            "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
+        })
+
+        # SOS history
+        sos_root.child("history").push({
+            "latitude": lat,
+            "longitude": lng,
+            "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
+        })
     except Exception as e:
         print("push_sos_record error:", e)
 
