@@ -220,7 +220,7 @@ def listen_for_command():
     while True:
         # --- CANCEL CHECK ---
         if cancel_listen:
-            return None
+            return "cancelled"
 
         try:
             with mic as source:
@@ -267,6 +267,9 @@ def listen_thread():
 
     is_listening = False
 
+    if cmd == "cancelled":
+        return   # do NOTHING, simply stop listening mode
+    
     if cmd is not None:
         handle_command(cmd)
 
