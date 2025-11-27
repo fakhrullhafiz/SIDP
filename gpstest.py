@@ -37,17 +37,6 @@ firebase_admin.initialize_app(cred, {
 })
 
 # ============================
-# TTS ENGINE
-# ============================
-def speak(text):
-    print(f"[Prime]: {text}")
-    engine = pyttsx3.init()  # Remove deviceName parameter
-    engine.setProperty('rate', 160)
-    engine.say(text)
-    engine.runAndWait()
-    engine.stop()
-
-# ============================
 # SPEECH RECOGNITION SETUP
 # ============================
 recognizer = sr.Recognizer()
@@ -67,6 +56,17 @@ STRICT_SOS_PHRASES = [
     "emergency",
     "please help me"
 ]
+
+# ============================
+# TTS ENGINE
+# ============================
+def speak(text):
+    print(f"[Prime]: {text}")
+    engine = pyttsx3.init()  # Remove deviceName parameter
+    engine.setProperty('rate', 160)
+    engine.say(text)
+    engine.runAndWait()
+    engine.stop()
 
 # ============================
 # GPS READ FUNCTION
