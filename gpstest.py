@@ -58,6 +58,12 @@ STRICT_SOS_PHRASES = [
 ]
 
 # ============================
+# Listening mode cancellation
+# ============================
+cancel_listen = False
+is_listening = False
+
+# ============================
 # TTS ENGINE
 # ============================
 def speak(text):
@@ -208,27 +214,32 @@ def live_tracking_loop():
 # LISTEN FOR COMMAND (ONLY ON BUTTON PRESS)
 # ============================
 def listen_for_command():
+    global cancel_listen
     valid_location_keywords = ["location", "where"]
 
     while True:
+        # --- CANCEL CHECK ---
+        if cancel_listen:
+            return None
+
         try:
             with mic as source:
                 speak("I'm listening.")
                 recognizer.adjust_for_ambient_noise(source, duration=0.7)
-                audio = recognizer.listen(source, timeout=5, phrase_time_limit=6)
+
+                # small timeout so cancel is responsive
+                audio = recognizer.listen(source, timeout=2, phrase_time_limit=6)
 
             cmd = recognizer.recognize_google(audio).lower()
             print(f"[Heard]: {cmd}")
 
-            # ------------- STRICT SOS MATCH -------------
+            # strict SOS
             if cmd in STRICT_SOS_PHRASES:
-                return cmd  # valid SOS command
+                return cmd
 
-            # ------------- LOCATION COMMANDS -------------
             if any(k in cmd for k in valid_location_keywords):
-                return cmd  # valid location-related
+                return cmd
 
-            # ------------- UNKNOWN COMMAND -------------
             speak("Sorry, I cannot comprehend that command.")
             continue
 
@@ -243,6 +254,21 @@ def listen_for_command():
             print(f"[FATAL SR ERROR]: {e}")
             speak("Speech system error.")
             return None
+            
+# ============================
+# LISTEN THREAD WRAPPER
+# ============================
+def listen_thread():
+    global is_listening, cancel_listen
+    is_listening = True
+    cancel_listen = False
+
+    cmd = listen_for_command()
+
+    is_listening = False
+
+    if cmd is not None:
+        handle_command(cmd)
 
 # ============================
 # COMMAND HANDLER
@@ -322,11 +348,11 @@ def check_buttons():
             
             if hold_time >= 1.5:
                 print("[BUTTON] Long press detected → CANCEL")
+                cancel_listen = True
                 speak("Listening cancelled.")
             else:
                 print("[BUTTON] Short press detected → START LISTENING")
-                cmd = listen_for_command()
-                handle_command(cmd)
+                threading.Thread(target=listen_thread, daemon=True).start()
             
             time.sleep(0.3)  # Debounce
         
