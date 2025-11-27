@@ -1,0 +1,20 @@
+[Unit]
+Description=SIDP Supervisor Service
+After=network.target
+
+[Service]
+Type=simple
+# Replace %RUN_USER% and %WORKDIR% when installing
+User=%RUN_USER%
+WorkingDirectory=%WORKDIR%
+# Use env python3 so it's portable across systems
+ExecStart=/usr/bin/env python3 %WORKDIR%/main.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sidp
+
+[Install]
+WantedBy=multi-user.target
