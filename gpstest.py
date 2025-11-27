@@ -9,7 +9,6 @@ import threading
 import firebase_admin
 from firebase_admin import credentials, db
 import RPi.GPIO as GPIO
-import RPi.GPIO as GPIO
 from zoneinfo import ZoneInfo
 import datetime
 

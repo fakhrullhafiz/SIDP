@@ -22,6 +22,7 @@ import traceback
 from collections import deque
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+import datetime
 
 # BLE
 import asyncio
@@ -44,6 +45,11 @@ from firebase_admin import credentials, db
 
 # GPIO
 import RPi.GPIO as GPIO
+
+# ============================
+# TIMEZONE SETUP (MALAYSIA)
+# ============================
+malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
 
 # -------------------------
 # === Credentials (exact as provided) ===
@@ -136,7 +142,8 @@ mic = sr.Microphone()  # may raise if no mic; wrap when used
 # Utility functions
 # -------------------------
 def now_iso():
-    return datetime.now(zone).isoformat()
+    # Return timestamp in the same format as gpstest.py using malaysia_tz
+    return datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
 
 def speak(text):
     """Thread-safe TTS using a single pyttsx3 engine."""
@@ -186,7 +193,7 @@ def push_sos_record(lat, lng, ts_iso, reason=None):
         # Use the same `sosDB` node structure as in gpstest.py so the dashboard keys match exactly.
         sos_root = db.reference("sosDB")
         # Use localised timestamp format matching gpstest.py: YYYY/MM/DD HH:MM:SS
-        ts_local = datetime.now(zone).strftime("%Y/%m/%d %H:%M:%S")
+        ts_local = datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
         # Update top-level sosDB with Active flag and coordinates (exact keys expected by dashboard)
         sos_root.update({
             "Active": True,
@@ -551,7 +558,7 @@ def beacon_event_processor():
                         "minor": minor,
                         "rssi": rssi,
                         "distance_m": distance,
-                        "detected_at": datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(zone).isoformat(),
+                        "detected_at": datetime.datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S"),
                         "gps_lat": lat,
                         "gps_lng": lng,
                         "gps_ts": gps_ts
