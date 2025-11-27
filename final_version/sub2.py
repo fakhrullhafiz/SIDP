@@ -33,6 +33,8 @@ import speech_recognition as sr
 
 # Networking / Firebase
 import requests
+import re
+from typing import Optional, Tuple
 import firebase_admin
 from firebase_admin import credentials, db
 
@@ -311,6 +313,107 @@ def get_nearest_place(lat, lng):
         print("get_nearest_place error:", e)
     return None, None
 
+
+# --- Friendly location helper (from testsub2) ---
+def geocode_latlng(lat: float, lng: float, api_key: str):
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&key={api_key}"
+    r = requests.get(url, timeout=6)
+    return r.json()
+
+
+def places_nearby(lat: float, lng: float, api_key: str) -> Tuple[Optional[str], Optional[str]]:
+    url = (
+        f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&rankby=distance&key={api_key}"
+    )
+    try:
+        r = requests.get(url, timeout=6)
+        js = r.json()
+        if js.get("status") == "OK" and js.get("results"):
+            top = js["results"][0]
+            name = top.get("name")
+            vicinity = top.get("vicinity") or top.get("formatted_address")
+            return name, vicinity
+    except Exception:
+        pass
+    return None, None
+
+
+def nice_address_from_components(components: list) -> Optional[str]:
+    mapping = {t: [] for t in (
+        "postal_code",
+        "locality",
+        "sublocality",
+        "administrative_area_level_2",
+        "administrative_area_level_1",
+        "country",
+    )}
+    for c in components:
+        for t in c.get("types", []):
+            if t in mapping:
+                mapping[t].append(c.get("long_name"))
+
+    parts = []
+    if mapping["locality"]:
+        parts.append(mapping["locality"][0])
+    elif mapping["sublocality"]:
+        parts.append(mapping["sublocality"][0])
+
+    if mapping["administrative_area_level_1"]:
+        parts.append(mapping["administrative_area_level_1"][0])
+    elif mapping["administrative_area_level_2"]:
+        parts.append(mapping["administrative_area_level_2"][0])
+
+    if mapping["country"]:
+        parts.append(mapping["country"][0])
+
+    if parts:
+        return ", ".join(parts)
+    return None
+
+
+def looks_like_plus_code(formatted_address: Optional[str], geocode_json: dict) -> bool:
+    if not formatted_address:
+        return False
+    if geocode_json.get("plus_code") and geocode_json["plus_code"].get("compound_code"):
+        return True
+    first = formatted_address.split(",")[0].strip()
+    if "+" in first and len(first) <= 12 and re.search(r"[A-Z0-9]+\+[A-Z0-9]+", first):
+        return True
+    return False
+
+
+def friendly_location(lat: float, lng: float, api_key: Optional[str] = None) -> str:
+    if api_key is None:
+        api_key = API_KEY
+    if not api_key:
+        return None
+
+    js = geocode_latlng(lat, lng, api_key)
+    formatted = None
+    try:
+        if js.get("status") == "OK" and js.get("results"):
+            formatted = js["results"][0].get("formatted_address")
+    except Exception:
+        formatted = None
+
+    if looks_like_plus_code(formatted, js):
+        name, vicinity = places_nearby(lat, lng, api_key)
+        if name:
+            if vicinity:
+                return f"{name}. {vicinity}"
+            return name
+        try:
+            comp = js.get("results", [])[0].get("address_components", [])
+            nice = nice_address_from_components(comp)
+            if nice:
+                return nice
+        except Exception:
+            pass
+
+    if formatted:
+        return formatted
+    return None
+
 # -------------------------
 # SOS & voice handling
 # -------------------------
@@ -370,6 +473,15 @@ def handle_command(cmd):
                 speak("I do not have a GPS fix right now.")
                 return
             speak(f"Current coordinates: latitude {round(lat,5)}, longitude {round(lng,5)}.")
+            try:
+                friendly = friendly_location(lat, lng)
+                if friendly:
+                    speak(f"My best guess: {friendly}")
+                    return
+            except Exception as e:
+                print("friendly_location error:", e)
+
+            # Fallback to previous behavior if friendly helper failed
             addr = reverse_geocode(lat, lng)
             if addr:
                 speak(f"My best guess: {addr}")
