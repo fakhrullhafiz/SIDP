@@ -13,6 +13,11 @@ from zoneinfo import ZoneInfo
 import datetime
 
 # ============================
+# TIMEZONE SETUP (MALAYSIA)
+# ============================
+malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
+
+# ============================
 # GOOGLE API KEY
 # ============================
 API_KEY = "YOUR_API_KEY"
