@@ -9,6 +9,13 @@ import threading
 import firebase_admin
 from firebase_admin import credentials, db
 import RPi.GPIO as GPIO
+from zoneinfo import ZoneInfo
+import datetime
+
+# ============================
+# TIMEZONE SETUP (MALAYSIA)
+# ============================
+malaysia_tz = ZoneInfo("Asia/Kuala_Lumpur")
 
 # ============================
 # GOOGLE API KEY
@@ -75,15 +82,25 @@ def push_live_location(lat, lng):
     ref.set({
         "latitude": lat,
         "longitude": lng,
-        "timestamp": time.time()
+        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
     })
 
 def push_sos(lat, lng):
-    ref = db.reference("sosDB")
-    ref.set({
+    sos_root = db.reference("sosDB")
+
+    # Latest SOS
+    sos_root.update({
+        "Active": True,
         "latitude": lat,
         "longitude": lng,
-        "timestamp": time.time()
+        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
+    })
+
+    # SOS history
+    sos_root.child("history").push({
+        "latitude": lat,
+        "longitude": lng,
+        "timestamp": datetime.datetime.now(malaysia_tz).strftime("%Y/%m/%d %H:%M:%S")
     })
 
 # ============================
