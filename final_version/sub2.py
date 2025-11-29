@@ -956,7 +956,7 @@ def beacon_event_processor():
 
 # -------------------------
 # Main
-# -------------------------
+# ------------------------- 
 def main():
     print("Starting gpstest_with_beacon.py")
     init_firebase()

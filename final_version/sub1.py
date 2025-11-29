@@ -50,7 +50,7 @@ mjpeg_server = None
 # FIREBASE UPLOADER THREAD
 # ========================================
 device_status_db.update({
-    "raspberryPi": "ON",
+    "raspberryPi": "ON" ,
     "camera": "OFF"
 })
 
@@ -296,6 +296,8 @@ def ultrasonic_worker():
             message, color, priority = "Warning", (0, 165, 255), 2
         elif distance < 200:
             message, color, priority = "Caution", (0, 255, 255), 3
+        elif distance > 400:
+            message, color, priority = "Clear", (0, 255, 0), 5
         else:
             message, color, priority = "Clear", (0, 255, 0), 5
 
